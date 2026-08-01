@@ -11,11 +11,34 @@ npm install
 npm run dev        # development
 npm run build      # production build into dist/
 npm run preview    # serve the production build
-npm test           # 156 tests
+npm test           # 205 tests
+npm run icons      # regenerate the PWA icons from scripts/generate-icons.mjs
 ```
 
 `dist/` is static — it can be hosted anywhere, and installs to a phone home
 screen as a PWA that works offline.
+
+## Deployment
+
+Pushing to the default branch builds and publishes to GitHub Pages via
+`.github/workflows/deploy.yml`. Tests gate the deploy, so a failing suite leaves
+the previous site in place.
+
+A project site is served from a subpath, so the build sets a Vite `base` when
+`GITHUB_PAGES=1`. Local dev and `npm run preview` are unaffected. To reproduce
+the deployed build exactly:
+
+```bash
+GITHUB_PAGES=1 npm run build && GITHUB_PAGES=1 npm run preview
+```
+
+Routing uses `HashRouter`, so deep links need no server rewrites.
+
+**A Pages site is publicly reachable even when the repository is private** —
+access-controlled Pages is an Enterprise feature. That exposes the *app*, not
+your data: every transaction stays in your own browser's IndexedDB and is never
+uploaded. Pages on a private repository also requires a paid GitHub plan; on the
+free plan, make the repository public or host `dist/` elsewhere.
 
 ## How it works
 

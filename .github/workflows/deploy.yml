@@ -1,0 +1,68 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [claude/budget-app-transactions-h4sago]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it — a half-published
+# site is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The suite runs in a few seconds, so there is no reason to let a broken
+      # build replace a working site.
+      - run: npm test
+
+      - name: Build
+        run: npm run build
+        env:
+          # Switches the Vite base to the project-site subpath.
+          GITHUB_PAGES: '1'
+
+      - name: Fail if the PWA icons are missing
+        # These are referenced by the manifest and were absent once already;
+        # without them "Add to Home Screen" silently degrades.
+        run: |
+          for f in icon-192.png icon-512.png icon-512-maskable.png apple-touch-icon.png manifest.webmanifest; do
+            test -s "dist/$f" || { echo "::error::dist/$f missing or empty"; exit 1; }
+          done
+
+      - uses: actions/configure-pages@v5
+        # Turns Pages on for the repo if it is not already enabled, so this
+        # does not need a manual settings change first.
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

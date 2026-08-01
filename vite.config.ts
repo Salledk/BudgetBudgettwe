@@ -3,7 +3,15 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { fileURLToPath, URL } from 'node:url'
 
+/*
+ * GitHub Pages serves a project site from a subpath, so the build needs a base
+ * for assets to resolve. It is opt-in via an env var rather than unconditional,
+ * so local dev and `npm run preview` keep serving from the root.
+ */
+const base = process.env.GITHUB_PAGES ? '/BudgetBudgettwe/' : '/'
+
 export default defineConfig({
+  base,
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -13,7 +21,7 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
-      includeAssets: ['favicon.svg'],
+      includeAssets: ['favicon.svg', 'apple-touch-icon.png'],
       manifest: {
         name: 'Budget',
         short_name: 'Budget',
@@ -22,11 +30,16 @@ export default defineConfig({
         background_color: '#0f172a',
         display: 'standalone',
         orientation: 'portrait',
-        start_url: '/',
+        lang: 'da-DK',
+        // Relative, so the installed app opens at whatever path it was served
+        // from. An absolute '/' would send the home-screen icon to the domain
+        // root, which on a project site is somebody else's page.
+        start_url: './',
+        scope: './',
         icons: [
-          { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: 'icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: 'icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
