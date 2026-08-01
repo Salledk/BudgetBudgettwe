@@ -20,6 +20,8 @@ screen as a PWA that works offline.
 
 ## Deployment
 
+Live at **https://salledk.github.io/BudgetBudgettwe/**
+
 Pushing to the default branch builds and publishes to GitHub Pages via
 `.github/workflows/deploy.yml`. Tests gate the deploy, so a failing suite leaves
 the previous site in place.
