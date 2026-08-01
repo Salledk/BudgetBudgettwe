@@ -34,11 +34,14 @@ GITHUB_PAGES=1 npm run build && GITHUB_PAGES=1 npm run preview
 
 Routing uses `HashRouter`, so deep links need no server rewrites.
 
-**A Pages site is publicly reachable even when the repository is private** —
-access-controlled Pages is an Enterprise feature. That exposes the *app*, not
-your data: every transaction stays in your own browser's IndexedDB and is never
-uploaded. Pages on a private repository also requires a paid GitHub plan; on the
-free plan, make the repository public or host `dist/` elsewhere.
+Pages has to be switched on once by hand, under **Settings → Pages → Source:
+GitHub Actions**. The workflow cannot do it: the Actions token is allowed to
+deploy to Pages but not to create the Pages site.
+
+**A Pages site is publicly reachable**, and on a private repository it still
+would be — access-controlled Pages is an Enterprise feature. That exposes the
+*app*, not your data: every transaction stays in your own browser's IndexedDB
+and is never uploaded.
 
 ## How it works
 

@@ -47,12 +47,11 @@ jobs:
             test -s "dist/$f" || { echo "::error::dist/$f missing or empty"; exit 1; }
           done
 
-      - uses: actions/configure-pages@v5
-        # Turns Pages on for the repo if it is not already enabled, so this
-        # does not need a manual settings change first.
-        with:
-          enablement: true
-
+      # No actions/configure-pages step: it exists to hand a framework the
+      # deployment base path, and that is already fixed by GITHUB_PAGES above.
+      # Its `enablement` option cannot help either — the default GITHUB_TOKEN
+      # may deploy to Pages but not create the Pages site, so enabling it is a
+      # one-time manual step under Settings → Pages → Source: GitHub Actions.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./dist
