@@ -23,6 +23,7 @@ export function tx(overrides: Partial<Transaction> = {}): Transaction {
     transferGroupId: null,
     importBatchId: 'batch-1',
     dedupHash: overrides.dedupHash ?? `hash-${counter}`,
+    externalId: null,
     notes: null,
     reviewed: false,
     updatedAt: 1,

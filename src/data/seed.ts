@@ -11,7 +11,9 @@ type NewCategory = Omit<Category, 'id' | 'updatedAt' | 'deletedAt'> & { id?: str
 const CATEGORY_SEED: NewCategory[] = [
   // Income
   { name: 'Løn', kind: 'income', parentId: null, icon: '💰', color: '#16a34a', isSystem: false, archived: false, sortOrder: 10 },
+  { name: 'Offentlige ydelser', kind: 'income', parentId: null, icon: '🏛️', color: '#15803d', isSystem: false, archived: false, sortOrder: 15 },
   { name: 'Refusion', kind: 'income', parentId: null, icon: '↩️', color: '#22c55e', isSystem: false, archived: false, sortOrder: 20 },
+  { name: 'Renter', kind: 'income', parentId: null, icon: '🪙', color: '#65a30d', isSystem: false, archived: false, sortOrder: 25 },
   { name: 'Anden indkomst', kind: 'income', parentId: null, icon: '✨', color: '#4ade80', isSystem: false, archived: false, sortOrder: 30 },
 
   // Fixed / recurring
@@ -80,7 +82,9 @@ const RULE_SEED: Array<{ patterns: string[]; category: string }> = [
     patterns: [
       'netto', 'føtex', 'fotex', 'rema', 'bilka', 'lidl', 'aldi', 'coop', '365discount', 'fakta',
       'irma', 'meny', 'spar', 'superbrugsen', 'kvickly', 'brugsen', 'salling', 'nemlig', 'købmand',
-      'løvbjerg', 'lovbjerg', 'abc lavpris',
+      'løvbjerg', 'lovbjerg', 'abc lavpris', 'inco', 'grønttorvet', 'slagter', 'bazar',
+      // Nordic and alpine chains, for groceries bought while travelling.
+      'ica', 'kiwi', 'willys', 'hemköp', 'coop-', 'migros', 'denner', 'spar ',
     ],
   },
   {
@@ -94,7 +98,11 @@ const RULE_SEED: Array<{ patterns: string[]; category: string }> = [
   { category: 'Café', patterns: ['cafe', 'café', 'kaffe', 'bager', 'konditori'] },
   {
     category: 'Bil & brændstof',
-    patterns: ['circle k', 'q8', 'shell', 'ok benzin', 'ok plus', 'uno-x', 'ingo', 'f24', 'tank', 'fdm', 'autoværksted', 'dæk'],
+    patterns: [
+      'circle k', 'q8', 'shell', 'ok benzin', 'ok plus', 'uno-x', 'ingo', 'f24', 'tank', 'fdm',
+      'autoværksted', 'dæk', 'thansen', 'autobahn', 'aral', 'esso', 'omv', 'agip', 'bilka byg',
+      'færge', 'broafgift', 'storebælt', 'øresundsbron', 'autopass',
+    ],
   },
   {
     category: 'Transport',
@@ -102,52 +110,117 @@ const RULE_SEED: Array<{ patterns: string[]; category: string }> = [
   },
   {
     category: 'Abonnementer',
-    patterns: ['spotify', 'netflix', 'hbo', 'max', 'viaplay', 'disney', 'tv 2 play', 'apple.com/bill', 'apple com bill', 'itunes', 'google', 'youtube', 'amazon prime', 'dropbox', 'adobe', 'microsoft', 'storytel', 'mofibo', 'podimo', 'audible', 'patreon', 'strava'],
+    // "max" is deliberately absent: it is too short and generic, and would
+    // claim Max Burger and anything else beginning with those letters.
+    patterns: ['spotify', 'netflix', 'hbo', 'viaplay', 'disney', 'tv 2 play', 'apple.com/bill', 'apple com bill', 'itunes', 'apple', 'google', 'youtube', 'amazon prime', 'dropbox', 'adobe', 'microsoft', 'storytel', 'mofibo', 'podimo', 'audible', 'patreon', 'strava', 'openai', 'anthropic', 'chatgpt', 'github', 'notion', 'canva'],
   },
   { category: 'Telefon', patterns: ['telia', 'telenor', 'yousee', 'cbb', 'oister', 'lebara', 'lycamobile', 'callme', 'telmore', 'greentel'] },
   { category: 'Internet & TV', patterns: ['hiper', 'fastspeed', 'stofa', 'waoo', 'kviknet', 'altibox', 'norlys internet'] },
   { category: 'El, vand & varme', patterns: ['ørsted', 'orsted', 'andel energi', 'norlys', 'ewii', 'nrgi', 'energi fyn', 'vandværk', 'hofor', 'fjernvarme', 'radius', 'cerius', 'gasleverandør', 'natur energi', 'velkommen'] },
-  { category: 'Forsikring', patterns: ['tryg', 'topdanmark', 'alka', 'codan', 'if forsikring', 'gjensidige', 'alm brand', 'lb forsikring', 'gf forsikring', 'popermo', 'pensiondanmark', 'sygeforsikring', 'danmark forsikring'] },
+  { category: 'Forsikring', patterns: ['tryg', 'topdanmark', 'alka', 'codan', 'if forsikring', 'gjensidige', 'alm brand', 'lb forsikring', 'gf forsikring', 'popermo', 'pensiondanmark', 'sygeforsikring', 'danmark forsikring', 'lærerstandens', 'runa forsikring', 'købstædernes'] },
   { category: 'Husleje', patterns: ['husleje', 'boligforening', 'boligselskab', 'lejemål', 'ejerforening', 'andelsboligforening', 'kab', 'dab', 'fsb', 'aab'] },
   { category: 'A-kasse & fagforening', patterns: ['a-kasse', 'akasse', 'fagforening', '3f', 'hk ', 'krifa', 'ase', 'ingeniørforeningen', 'djøf', 'dansk metal', 'ftfa', 'magistrenes'] },
   { category: 'Lån & afdrag', patterns: ['realkredit', 'totalkredit', 'nordea kredit', 'jyske realkredit', 'lån & spar', 'afdrag', 'santander', 'ekspres bank', 'resurs bank'] },
   { category: 'Sundhed & apotek', patterns: ['apotek', 'læge', 'tandlæge', 'fysioterapi', 'kiropraktor', 'psykolog', 'sygesikring', 'falck', 'hospital', 'klinik'] },
   { category: 'Personlig pleje', patterns: ['matas', 'normal', 'frisør', 'saloon', 'the body shop', 'skønhed'] },
-  { category: 'Fritid & hobby', patterns: ['fitness world', 'sats', 'puregym', 'loop fitness', 'sportmaster', 'intersport', 'decathlon', 'stadium', 'padel', 'svømmehal', 'bibliotek', 'golf'] },
+  {
+    category: 'Fritid & hobby',
+    patterns: [
+      'fitness world', 'sats', 'puregym', 'loop fitness', 'sportmaster', 'intersport', 'decathlon',
+      'stadium', 'padel', 'svømmehal', 'bibliotek', 'golf', 'eventyrsport', 'skistar', 'friluftsland',
+      'spejder', 'sport', 'hockey', 'kajak', 'kanot', 'yacht', 'sejl', 'lift', 'bahn', 'seilbahn',
+    ],
+  },
   { category: 'Underholdning', patterns: ['nordisk film', 'cinemaxx', 'biograf', 'ticketmaster', 'billetlugen', 'billetto', 'tivoli', 'zoo', 'koncert', 'steam', 'playstation', 'nintendo', 'xbox'] },
-  { category: 'Tøj & sko', patterns: ['h&m', 'zara', 'zalando', 'bestseller', 'only', 'vero moda', 'jack jones', 'magasin', 'bahne', 'skoringen', 'nike', 'adidas', 'asos', 'boozt', 'na-kd'] },
-  { category: 'Hjem & husholdning', patterns: ['ikea', 'jysk', 'ilva', 'sinnerup', 'elgiganten', 'power', 'bilka byg', 'silvan', 'bauhaus', 'jem og fix', 'stark', 'flying tiger', 'søstrene grene', 'sostrene grene', 'imerco', 'kop og kande'] },
+  { category: 'Tøj & sko', patterns: ['h&m', 'zara', 'zalando', 'bestseller', 'only', 'vero moda', 'jack jones', 'magasin', 'bahne', 'skoringen', 'nike', 'adidas', 'asos', 'boozt', 'na-kd', 'vinted', 'temu', 'shein', 'zizzi', 'name it'] },
+  {
+    category: 'Hjem & husholdning',
+    patterns: [
+      'ikea', 'jysk', 'ilva', 'sinnerup', 'elgiganten', 'power', 'silvan', 'bauhaus', 'jem og fix',
+      'stark', 'flying tiger', 'søstrene grene', 'sostrene grene', 'imerco', 'kop og kande',
+      'proshop', 'komplett', 'computersalg', 'harald nyborg', 'biltema', 'bygma', 'johannes fog',
+      'træ', 'tømrer', 'vvs', 'elektriker', 'maler', 'montering', 'vaskeri', 'renovation',
+    ],
+  },
   { category: 'Gaver', patterns: ['gavekort', 'interflora', 'blomster'] },
   { category: 'Rejser & ferie', patterns: ['sas', 'norwegian', 'ryanair', 'booking.com', 'airbnb', 'hotel', 'momondo', 'travellink', 'apollo rejser', 'spies', 'tui', 'dfds', 'molslinjen', 'scandlines'] },
   { category: 'Børn', patterns: ['daginstitution', 'vuggestue', 'børnehave', 'sfo', 'babysam', 'legetøj', 'br ', 'fritidshjem'] },
   { category: 'Kontanter', patterns: ['hævning', 'haevning', 'kontant', 'atm', 'automat udbetaling'] },
-  { category: 'Løn', patterns: ['lønoverførsel', 'lon overforsel', 'løn ', 'salær', 'udbetaling løn'] },
+  {
+    category: 'Løn',
+    // "LØNOVER." is how several Danish banks abbreviate lønoverførsel.
+    patterns: ['lønoverførsel', 'lon overforsel', 'lønover', 'lonover', 'salær', 'udbetaling løn', 'feriepenge'],
+  },
+  {
+    category: 'Offentlige ydelser',
+    patterns: [
+      'børne- og ungeydelse', 'børneydelse', 'ungeydelse', 'boligstøtte', 'su ', 'su-styrelsen',
+      'udbetaling danmark', 'skattestyrelsen', 'overskydende skat', 'pensionsudbetaling',
+    ],
+  },
+  { category: 'Renter', patterns: ['rente', 'renter', 'rentetilskrivning'] },
+  { category: 'Refusion', patterns: ['udlæg retur', 'refusion', 'tilbagebetaling'] },
+]
+
+/**
+ * Internal movements between the user's own accounts.
+ *
+ * Normally these are found by pairing the two halves across accounts, but that
+ * only works when both accounts have been imported. Many banks export a single
+ * account at a time, and label the transfer with the *other* account's name —
+ * so "Budget" or "Savings" as an entire description is a transfer whose
+ * counterpart may never arrive.
+ *
+ * Matched exactly against the cleaned merchant key, so an actual shop called
+ * "Budget Rent a Car" is not swallowed by the rule.
+ */
+const TRANSFER_SEED: Array<{ patterns: string[]; matchType: 'exact' | 'contains' }> = [
+  // "Budget" and "Forbrug" are ordinary Danish words that also appear in shop
+  // names, so they must match the whole description or not at all.
+  { matchType: 'exact', patterns: ['budget', 'budgetkonto', 'forbrug', 'forbrugskonto', 'nemkonto', 'opsparing', 'opsparingskonto'] },
+  // "Savings" is not a Danish word and effectively only appears as an account
+  // label, so a looser match is safe — and catches "Savings / udlæg".
+  { matchType: 'contains', patterns: ['savings', 'overførsel', 'overforsel', 'straksoverførsel', 'egen konto', 'til egne konti'] },
 ]
 
 export function buildSeedRules(categories: Category[], now = Date.now()): Rule[] {
   const byName = new Map(categories.map((c) => [c.name, c.id]))
   const rules: Rule[] = []
 
+  const push = (pattern: string, categoryId: string, matchType: Rule['matchType'], priority: number) => {
+    rules.push({
+      id: newId(now),
+      pattern: pattern.trim(),
+      matchType,
+      categoryId,
+      priority,
+      source: 'seed',
+      hitCount: 0,
+      enabled: true,
+      updatedAt: now,
+      deletedAt: null,
+    })
+  }
+
+  // Transfers first, at the highest seed priority: misreading an internal
+  // move as income or expense distorts every total downstream, so it must win
+  // over an unlucky merchant-name collision.
+  for (const group of TRANSFER_SEED) {
+    for (const pattern of group.patterns) {
+      push(pattern, SYSTEM_CATEGORY.transfer, group.matchType, 500 + pattern.trim().length)
+    }
+  }
+
   for (const group of RULE_SEED) {
     const categoryId = byName.get(group.category)
     if (!categoryId) continue
     for (const pattern of group.patterns) {
-      rules.push({
-        id: newId(now),
-        pattern: pattern.trim(),
-        matchType: 'contains',
-        categoryId,
-        // Seed rules sit below user rules (1000+) so a user override always wins.
-        // Longer patterns rank higher so "ok benzin" beats a bare "ok".
-        priority: 100 + pattern.trim().length,
-        source: 'seed',
-        hitCount: 0,
-        enabled: true,
-        updatedAt: now,
-        deletedAt: null,
-      })
+      // Seed rules sit below user rules (1000+) so a user override always wins.
+      // Longer patterns rank higher so "ok benzin" beats a bare "ok".
+      push(pattern, categoryId, 'contains', 100 + pattern.trim().length)
     }
   }
+
   return rules
 }
 

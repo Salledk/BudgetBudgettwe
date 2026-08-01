@@ -15,6 +15,15 @@ export function dedupHashFor(accountId: string, date: string, amountMinor: numbe
   return stableHash(`${accountId}|${date}|${amountMinor}|${dedupText(rawText)}|${occurrence}`)
 }
 
+/**
+ * When the bank supplies its own transaction id, that is the authoritative
+ * fingerprint: it survives the bank restating a description or a balance, and
+ * it distinguishes two identical purchases without any occurrence counting.
+ */
+export function dedupHashForExternalId(accountId: string, externalId: string): string {
+  return stableHash(`${accountId}|id|${externalId.trim().toLowerCase()}`)
+}
+
 export interface DedupResult {
   fresh: Array<ParsedRow & { dedupHash: string }>
   duplicates: Array<ParsedRow & { dedupHash: string }>
@@ -36,11 +45,16 @@ export function splitDuplicates(rows: ParsedRow[], accountId: string, existing: 
   const ordered = [...rows].sort((a, b) => a.date.localeCompare(b.date) || a.sourceRow - b.sourceRow)
 
   for (const row of ordered) {
-    const base = `${row.date}|${row.amountMinor}|${dedupText(row.rawText)}`
-    const occurrence = seenInFile.get(base) ?? 0
-    seenInFile.set(base, occurrence + 1)
+    let dedupHash: string
+    if (row.externalId) {
+      dedupHash = dedupHashForExternalId(accountId, row.externalId)
+    } else {
+      const base = `${row.date}|${row.amountMinor}|${dedupText(row.rawText)}`
+      const occurrence = seenInFile.get(base) ?? 0
+      seenInFile.set(base, occurrence + 1)
+      dedupHash = dedupHashFor(accountId, row.date, row.amountMinor, row.rawText, occurrence)
+    }
 
-    const dedupHash = dedupHashFor(accountId, row.date, row.amountMinor, row.rawText, occurrence)
     const withHash = { ...row, dedupHash }
 
     if (existing.has(dedupHash)) duplicates.push(withHash)

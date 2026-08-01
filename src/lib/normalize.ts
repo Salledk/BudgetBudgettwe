@@ -48,6 +48,9 @@ export function merchantKey(rawText: string): string {
   }
 
   s = s
+    // Leading prepositions banks prefix to counterparty names: "FRA VESTERHUS
+    // WINE" and "TIL VESTERHUS WINE" are the same party in both directions.
+    .replace(/^(fra|til|from|to)\s+/i, '')
     // Store/branch numbers: "netto 1234" → "netto". Bare 2-6 digit runs only;
     // longer ones were already removed as references above.
     .replace(/\b\d{2,6}\b/g, ' ')

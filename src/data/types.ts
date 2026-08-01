@@ -60,6 +60,8 @@ export interface Transaction extends BaseRecord {
   transferGroupId: string | null
   importBatchId: string
   dedupHash: string
+  /** The bank's own id for this transaction, when the export provided one. */
+  externalId: string | null
   notes: string | null
   /** User has seen and accepted a `learned` suggestion. */
   reviewed: boolean
@@ -117,6 +119,11 @@ export interface BankProfile extends BaseRecord {
   creditColumn: string | null
   descriptionColumns: string[]
   balanceColumn: string | null
+  /**
+   * Column holding the bank's own transaction id, when the export has one.
+   * Far more reliable for duplicate detection than a fingerprint we derive.
+   */
+  idColumn: string | null
   decimalSeparator: ',' | '.' | 'auto'
   /** Some exports write outflows as positive numbers in a single column. */
   invertSign: boolean

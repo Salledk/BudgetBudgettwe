@@ -9,6 +9,7 @@ function row(overrides: Partial<ParsedRow> = {}): ParsedRow {
     rawText: 'NETTO 1234',
     merchantKey: 'netto',
     balanceAfterMinor: null,
+    externalId: null,
     sourceRow: 2,
     ...overrides,
   }
@@ -85,6 +86,45 @@ describe('splitDuplicates', () => {
     expect(fresh).toHaveLength(2)
     expect(duplicates).toHaveLength(2)
     expect(fresh.map((f) => f.date)).toEqual(['2026-04-02', '2026-04-09'])
+  })
+
+  it('uses the bank id as the fingerprint when the export has one', () => {
+    const rows = [
+      row({ externalId: 'fa5620df-bbd1-458c-94ed-a7543cc3f2f5' }),
+      row({ externalId: 'c92a4081-9b95-40c6-a2a8-6a48f9216966' }),
+    ]
+    const first = splitDuplicates(rows, 'acc', new Set())
+    expect(first.fresh).toHaveLength(2)
+
+    const stored = new Set(first.fresh.map((r) => r.dedupHash))
+    expect(splitDuplicates(rows, 'acc', stored).duplicates).toHaveLength(2)
+  })
+
+  it('recognises a re-export even when the bank restates the description', () => {
+    // A derived fingerprint would treat this as a new transaction; the bank's
+    // own id does not care what the description says.
+    const original = row({ externalId: 'fa5620df-bbd1', rawText: 'NETTO 1234' })
+    const restated = row({ externalId: 'fa5620df-bbd1', rawText: 'Netto Nørrebrogade 155' })
+
+    const stored = new Set(splitDuplicates([original], 'acc', new Set()).fresh.map((r) => r.dedupHash))
+    expect(splitDuplicates([restated], 'acc', stored).duplicates).toHaveLength(1)
+  })
+
+  it('keeps two identical purchases apart by their differing bank ids', () => {
+    const rows = [row({ externalId: 'id-a' }), row({ externalId: 'id-b' })]
+    const { fresh } = splitDuplicates(rows, 'acc', new Set())
+
+    expect(fresh).toHaveLength(2)
+    expect(fresh[0].dedupHash).not.toBe(fresh[1].dedupHash)
+  })
+
+  it('falls back to the derived fingerprint for rows with no bank id', () => {
+    const rows = [row({ externalId: 'id-a' }), row({ externalId: null, rawText: 'CASH' })]
+    const first = splitDuplicates(rows, 'acc', new Set())
+    expect(first.fresh).toHaveLength(2)
+
+    const stored = new Set(first.fresh.map((r) => r.dedupHash))
+    expect(splitDuplicates(rows, 'acc', stored).duplicates).toHaveLength(2)
   })
 
   it('scopes duplicates to one account', () => {

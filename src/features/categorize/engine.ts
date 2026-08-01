@@ -87,8 +87,39 @@ function matchesRule(rule: Rule, haystack: string, key: string): boolean {
       }
     case 'contains':
     default:
-      return haystack.includes(pattern) || (key !== '' && key.includes(pattern))
+      return matchesAtWordStart(haystack, pattern) || (key !== '' && matchesAtWordStart(key, pattern))
   }
+}
+
+const wordStartCache = new Map<string, RegExp>()
+
+/**
+ * Substring match anchored to the start of a word.
+ *
+ * A plain `includes` is far too loose on bank text: "3f" occurs constantly
+ * inside hexadecimal reference ids, and "ase" sits inside "Andreasen" and
+ * "Basel". Anchoring to a word start kills those while still matching the
+ * run-together names banks produce, like "LIDL281KBENHAVNNVTUBOR" for "lidl".
+ */
+function matchesAtWordStart(haystack: string, pattern: string): boolean {
+  let re = wordStartCache.get(pattern)
+  if (!re) {
+    const trimmed = pattern.trim()
+    const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const boundary = '[^\\p{L}\\p{N}]'
+
+    // Very short patterns must match a whole token. "3f" otherwise matches the
+    // tail of a hyphenated hex reference like "5d0c-3f2a", and "ase" the middle
+    // of "Andreasen". Longer patterns only need a word start, so run-together
+    // bank text such as "LIDL281KBENHAVNNVTUBOR" still matches "lidl".
+    re =
+      trimmed.length <= 3
+        ? new RegExp(`(^|${boundary})${escaped}(${boundary}|$)`, 'iu')
+        : new RegExp(`(^|${boundary})${escaped}`, 'iu')
+
+    wordStartCache.set(pattern, re)
+  }
+  return re.test(haystack)
 }
 
 function learnedMatch(key: string, history: MerchantHistory): CategorisationResult | null {

@@ -29,12 +29,16 @@ Drop a CSV or Excel export from your bank onto the Import screen. The app:
 2. **Guesses the column mapping** from header names, then sanity-checks the
    guess against actual cell contents and shows a preview of what will be
    stored. A wrong amount column is silent corruption, not a visible error, so
-   it is worth confirming before importing.
+   it is worth confirming before importing. Identifier columns are detected and
+   kept *out* of the description — folding a UUID into the text would give every
+   transaction a unique merchant key, defeating rules and learning completely.
 3. **Remembers the layout.** The mapping is saved against the file's header
    signature, so every subsequent import from the same bank is two taps.
-4. **Skips duplicates.** Re-importing an overlapping statement adds only the
-   new rows. Two genuinely identical purchases on the same day both survive —
-   the fingerprint includes an occurrence index.
+4. **Skips duplicates.** When the export carries the bank's own transaction id,
+   that is used as the fingerprint — it survives the bank restating a
+   description and needs no guessing. Otherwise a fingerprint is derived from
+   account, date, amount and text, with an occurrence index so two genuinely
+   identical purchases on the same day both survive.
 5. **Pairs transfers between your own accounts** (see below).
 6. **Categorises** what it can.
 
@@ -55,6 +59,18 @@ They exist for three concrete reasons, not as bookkeeping ceremony:
 Budgets and categories are **global**, not per-account, so accounts stay out of
 the way in daily use.
 
+**Single-account exports.** Pairing only works when both sides have been
+imported, and many banks export one account at a time — labelling the transfer
+with the *other* account's name, so the description is simply `Budget` or
+`Savings`. Those counterparts may never arrive, so seed rules also recognise an
+account name used as an entire description and mark it as a transfer. This
+matters a lot: on a real seven-month statement these accounted for roughly
+140.000 kr that would otherwise have been counted as spending.
+
+For a complete picture, export **every** account. Money moved to a budget
+account is correctly excluded from spending, but the bills eventually paid from
+that account only appear once you import it too.
+
 ### Categorisation
 
 Three layers, first match wins:
@@ -65,6 +81,12 @@ Three layers, first match wins:
 3. **Learned** — a merchant you have categorised consistently before. Requires
    at least two past transactions agreeing at 70%+, and the result lands in a
    review queue rather than being applied silently.
+
+Patterns match at **word starts**, and short patterns must match a whole token.
+A plain substring match is far too loose on bank text: `3f` occurs constantly
+inside hexadecimal reference ids, and `ase` sits inside "Andre**ase**n" and
+"B**ase**l". Anchoring also keeps `sport` out of "tran**sport**" while still
+matching the run-together names banks produce, like `LIDL281KBENHAVNNVTUBOR`.
 
 Matching runs against a normalised *merchant key*, not raw bank text. All three
 of these collapse to `netto`:
@@ -79,9 +101,12 @@ Store numbers, embedded dates, card references, receipt numbers and trailing
 city names are all stripped, because they vary per transaction and would
 otherwise make every visit look like a different shop.
 
-MobilePay payments to people are deliberately left uncategorised — "MobilePay
-Anders" could be rent, a shared dinner or a gift, and guessing wrong is worse
-than leaving it blank.
+Payments to people are deliberately left uncategorised — "MobilePay Anders"
+could be rent, a shared dinner or a gift, and guessing wrong is worse than
+leaving it blank. On a real statement this is a large share of what remains
+after auto-categorisation: roughly half the uncategorised rows and half the
+uncategorised money. These are the transactions worth teaching the app once,
+after which rules and the learned layer handle them.
 
 When you recategorise something manually, the app offers to remember it. Saying
 yes creates a rule and back-fills matching past transactions immediately.

@@ -55,6 +55,55 @@ describe('categorise', () => {
   })
 })
 
+describe('word-start matching', () => {
+  it('does not match a short pattern inside a hexadecimal reference', () => {
+    // "3f" occurs constantly inside UUIDs; a plain substring match turned a
+    // union-dues rule into 63 false positives on one real statement.
+    const rules = [rule({ pattern: '3f', categoryId: 'union' })]
+
+    expect(categorise(tx({ rawText: 'Autobahn Tank b530afe6-5d0c-3f2a' }), rules).categoryId).toBeNull()
+    // A standalone token still matches.
+    expect(categorise(tx({ rawText: '3F Fagforening' }), rules).categoryId).toBe('union')
+  })
+
+  it('does not match a pattern inside an ordinary word', () => {
+    const rules = [rule({ pattern: 'ase', categoryId: 'union' })]
+
+    expect(categorise(tx({ rawText: 'Jesper Kron Andreasen' }), rules).categoryId).toBeNull()
+    expect(categorise(tx({ rawText: 'PARKHAUSER BASEL-STADT' }), rules).categoryId).toBeNull()
+    expect(categorise(tx({ rawText: 'ASE A-kasse' }), rules).categoryId).toBe('union')
+  })
+
+  it('distinguishes "sport" from "transport"', () => {
+    const rules = [rule({ pattern: 'sport', categoryId: 'leisure' })]
+
+    expect(categorise(tx({ rawText: 'Transport Movia' }), rules).categoryId).toBeNull()
+    expect(categorise(tx({ rawText: 'SPORT HAGLEITNER' }), rules).categoryId).toBe('leisure')
+  })
+
+  it('still matches names the bank runs together with other text', () => {
+    // Real exports produce "LIDL281KBENHAVNNVTUBOR" for a Lidl purchase.
+    const rules = [rule({ pattern: 'lidl', categoryId: 'groceries' })]
+    expect(categorise(tx({ rawText: 'LIDL281KBENHAVNNVTUBOR' }), rules).categoryId).toBe('groceries')
+  })
+
+  it('handles Danish letters at the boundary', () => {
+    const rules = [rule({ pattern: 'rente', categoryId: 'interest' })]
+
+    expect(categorise(tx({ rawText: 'Rente' }), rules).categoryId).toBe('interest')
+    // "ø" is a letter, so "børenteX" must not count as a word start.
+    expect(categorise(tx({ rawText: 'børente' }), rules).categoryId).toBeNull()
+  })
+
+  it('treats a pattern with regex characters literally', () => {
+    const rules = [rule({ pattern: 'apple.com/bill', categoryId: 'subs' })]
+
+    expect(categorise(tx({ rawText: 'APPLE.COM/BILL' }), rules).categoryId).toBe('subs')
+    // The dot must not act as a wildcard.
+    expect(categorise(tx({ rawText: 'applexcom/bill' }), rules).categoryId).toBeNull()
+  })
+})
+
 describe('learned layer', () => {
   it('reuses a category the user has applied consistently', () => {
     const history = buildHistory(new Map([['slagter hansen', new Map([['groceries', 4]])]]))

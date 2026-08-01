@@ -21,6 +21,8 @@ export interface ParsedRow {
   rawText: string
   merchantKey: string
   balanceAfterMinor: number | null
+  /** The bank's own transaction id, when the export supplied one. */
+  externalId: string | null
   /** Index in the source file, for error reporting. */
   sourceRow: number
 }
@@ -174,6 +176,10 @@ const AMOUNT_HINTS = ['beløb', 'belob', 'amount', 'beløb i dkk', 'transaktions
 const BALANCE_HINTS = ['saldo', 'balance', 'saldo efter', 'bogført saldo']
 const DEBIT_HINTS = ['debet', 'debit', 'hævet', 'haevet', 'ud', 'withdrawal']
 const CREDIT_HINTS = ['kredit', 'credit', 'indsat', 'ind', 'deposit']
+const ID_HINTS = [
+  'transaktions-id', 'transaktionsid', 'transaction id', 'transaktionsnummer',
+  'id', 'reference', 'referencenummer', 'arkivreference', 'bilagsnummer', 'løbenummer',
+]
 
 function scoreHeader(header: string, hints: string[]): number {
   const h = header.toLowerCase().replace(/\s+/g, ' ').trim()
@@ -226,7 +232,24 @@ export function guessMapping(table: RawTable): ColumnMapping {
 
   const amountMode: AmountMode = !amountColumn && debitColumn && creditColumn ? 'debit-credit' : 'single'
 
-  const used = new Set([dateColumn, balanceColumn, amountColumn, debitColumn, creditColumn].filter(Boolean) as string[])
+  /*
+   * Resolved after the numeric columns are claimed, and before descriptions.
+   *
+   * After, because an amount column contains no long words and would otherwise
+   * satisfy the "not human text" half of the identifier test. Before, because
+   * an id column is textual enough to be mistaken for a description — and
+   * folding a UUID into the description gives every transaction a unique
+   * merchant key, which defeats categorisation entirely.
+   */
+  const claimed = [dateColumn, balanceColumn, amountColumn, debitColumn, creditColumn].filter(Boolean) as string[]
+  const idColumn =
+    pickColumn(headers, ID_HINTS, claimed) ??
+    headers.find((h) => !claimed.includes(h) && columnLooksLikeIdentifier(sample, h)) ??
+    null
+
+  const used = new Set(
+    [dateColumn, balanceColumn, amountColumn, debitColumn, creditColumn, idColumn].filter(Boolean) as string[],
+  )
   let descriptionColumns = headers.filter((h) => !used.has(h) && scoreHeader(h, TEXT_HINTS) > 0)
   if (descriptionColumns.length === 0) {
     // Any remaining mostly-textual column will do.
@@ -247,10 +270,43 @@ export function guessMapping(table: RawTable): ColumnMapping {
     creditColumn: amountMode === 'debit-credit' ? creditColumn : null,
     descriptionColumns,
     balanceColumn,
+    idColumn,
     decimalSeparator: 'auto',
     invertSign: false,
     skipRows: 0,
   }
+}
+
+/**
+ * True for columns holding opaque per-row identifiers — UUIDs, long hex
+ * references, receipt numbers.
+ *
+ * Two signals together: the values are nearly all distinct, and they look like
+ * machine identifiers rather than words. Uniqueness alone is not enough, since
+ * a description column is often unique too.
+ */
+function columnLooksLikeIdentifier(rows: Array<Record<string, string>>, header: string): boolean {
+  const values = rows.map((r) => r[header]).filter((v) => v && v.trim() !== '')
+  if (values.length < 3) return false
+
+  const distinct = new Set(values).size
+  if (distinct / values.length < 0.9) return false
+
+  // A column of amounts or dates is unique and wordless too. Rule those out
+  // explicitly rather than letting them pass the "not human text" test.
+  const numericish = values.filter((v) => parseAmount(v) !== null || parseDate(v) !== null).length
+  if (numericish / values.length > 0.5) return false
+
+  const idShaped = values.filter((v) => {
+    const s = v.trim()
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.test(s)) return true // UUID
+    if (/^[0-9a-f]{16,}$/i.test(s)) return true // long hex
+    if (/^\d{10,}$/.test(s)) return true // long numeric reference
+    // No word longer than two letters — not human text.
+    return !/[a-zæøå]{3,}/i.test(s)
+  }).length
+
+  return idShaped / values.length >= 0.8
 }
 
 function columnLooksLikeDate(rows: Array<Record<string, string>>, header: string): boolean {
@@ -317,12 +373,15 @@ export function applyMapping(
       ? parseAmount(raw[mapping.balanceColumn] ?? '', { decimalSeparator: mapping.decimalSeparator })
       : null
 
+    const externalId = mapping.idColumn ? (raw[mapping.idColumn] ?? '').trim() || null : null
+
     rows.push({
       date,
       amountMinor,
       rawText: rawText || '(ingen tekst)',
       merchantKey: merchantKey(rawText),
       balanceAfterMinor,
+      externalId,
       sourceRow,
     })
   })

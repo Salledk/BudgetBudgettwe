@@ -58,6 +58,7 @@ export async function runImport(params: {
     transferGroupId: null,
     importBatchId: batchId,
     dedupHash: row.dedupHash,
+    externalId: row.externalId,
     notes: null,
     reviewed: false,
     updatedAt: ts,

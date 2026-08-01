@@ -416,6 +416,22 @@ function MappingWizard({
           </select>
         </Field>
 
+        <Field label="Transaktions-ID (valgfri)">
+          <select
+            className="field"
+            value={mapping.idColumn ?? ''}
+            onChange={(e) => set({ idColumn: e.target.value || null })}
+          >
+            <option value="">— ingen —</option>
+            {table.headers.map((h) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-ink-500">
+            Bankens eget id. Bruges til at genkende transaktioner du allerede har importeret.
+          </p>
+        </Field>
+
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
@@ -483,6 +499,7 @@ function toMapping(profile: {
   creditColumn: string | null
   descriptionColumns: string[]
   balanceColumn: string | null
+  idColumn?: string | null
   decimalSeparator: ColumnMapping['decimalSeparator']
   invertSign: boolean
   skipRows: number
@@ -497,6 +514,8 @@ function toMapping(profile: {
     creditColumn: profile.creditColumn,
     descriptionColumns: profile.descriptionColumns,
     balanceColumn: profile.balanceColumn,
+    // Older saved profiles predate id-column support.
+    idColumn: profile.idColumn ?? null,
     decimalSeparator: profile.decimalSeparator,
     invertSign: profile.invertSign,
     skipRows: profile.skipRows,
