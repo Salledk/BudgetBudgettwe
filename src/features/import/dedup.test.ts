@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dedupHashFor, splitDuplicates } from './dedup'
+import { dedupHashFor, dedupHashForExternalId, splitDuplicates } from './dedup'
 import type { ParsedRow } from './parse'
 
 function row(overrides: Partial<ParsedRow> = {}): ParsedRow {
@@ -116,6 +116,37 @@ describe('splitDuplicates', () => {
 
     expect(fresh).toHaveLength(2)
     expect(fresh[0].dedupHash).not.toBe(fresh[1].dedupHash)
+  })
+
+  it('survives an id column that repeats values', () => {
+    // A wrongly-mapped column, or a bank that reuses references, must not
+    // produce two identical fingerprints — the unique index would reject the
+    // entire batch rather than the offending row.
+    const rows = [
+      row({ externalId: '01:34:46', date: '2026-02-03', amountMinor: -15215 }),
+      row({ externalId: '01:34:46', date: '2026-03-03', amountMinor: -30010 }),
+      row({ externalId: '01:34:46', date: '2026-04-03', amountMinor: -12000 }),
+    ]
+    const { fresh } = splitDuplicates(rows, 'acc', new Set())
+
+    expect(fresh).toHaveLength(3)
+    expect(new Set(fresh.map((f) => f.dedupHash)).size).toBe(3)
+  })
+
+  it('still recognises a re-import when ids repeat', () => {
+    const rows = [
+      row({ externalId: 'dup', date: '2026-02-03', amountMinor: -100 }),
+      row({ externalId: 'dup', date: '2026-03-03', amountMinor: -200 }),
+    ]
+    const stored = new Set(splitDuplicates(rows, 'acc', new Set()).fresh.map((r) => r.dedupHash))
+
+    expect(splitDuplicates(rows, 'acc', stored).duplicates).toHaveLength(2)
+  })
+
+  it('keeps the fingerprint stable for a unique id', () => {
+    // Files imported before repeated ids were handled must not all look new.
+    const a = splitDuplicates([row({ externalId: 'abc-123' })], 'acc', new Set()).fresh[0]
+    expect(a.dedupHash).toBe(dedupHashForExternalId('acc', 'abc-123'))
   })
 
   it('falls back to the derived fingerprint for rows with no bank id', () => {

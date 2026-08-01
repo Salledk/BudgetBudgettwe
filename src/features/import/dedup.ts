@@ -20,8 +20,11 @@ export function dedupHashFor(accountId: string, date: string, amountMinor: numbe
  * fingerprint: it survives the bank restating a description or a balance, and
  * it distinguishes two identical purchases without any occurrence counting.
  */
-export function dedupHashForExternalId(accountId: string, externalId: string): string {
-  return stableHash(`${accountId}|id|${externalId.trim().toLowerCase()}`)
+export function dedupHashForExternalId(accountId: string, externalId: string, occurrence = 0): string {
+  const base = `${accountId}|id|${externalId.trim().toLowerCase()}`
+  // The occurrence suffix is omitted at 0 so hashes stay stable for files
+  // already imported before repeated ids were handled.
+  return stableHash(occurrence === 0 ? base : `${base}|${occurrence}`)
 }
 
 export interface DedupResult {
@@ -45,15 +48,19 @@ export function splitDuplicates(rows: ParsedRow[], accountId: string, existing: 
   const ordered = [...rows].sort((a, b) => a.date.localeCompare(b.date) || a.sourceRow - b.sourceRow)
 
   for (const row of ordered) {
-    let dedupHash: string
-    if (row.externalId) {
-      dedupHash = dedupHashForExternalId(accountId, row.externalId)
-    } else {
-      const base = `${row.date}|${row.amountMinor}|${dedupText(row.rawText)}`
-      const occurrence = seenInFile.get(base) ?? 0
-      seenInFile.set(base, occurrence + 1)
-      dedupHash = dedupHashFor(accountId, row.date, row.amountMinor, row.rawText, occurrence)
-    }
+    // Occurrence counting applies to both schemes. A bank id is supposed to be
+    // unique, but the column may have been mapped wrongly in the wizard, or the
+    // export may simply repeat one — and a fingerprint collision would abort
+    // the entire import on the unique index rather than affecting one row.
+    const base = row.externalId
+      ? `id|${row.externalId.trim().toLowerCase()}`
+      : `${row.date}|${row.amountMinor}|${dedupText(row.rawText)}`
+    const occurrence = seenInFile.get(base) ?? 0
+    seenInFile.set(base, occurrence + 1)
+
+    const dedupHash = row.externalId
+      ? dedupHashForExternalId(accountId, row.externalId, occurrence)
+      : dedupHashFor(accountId, row.date, row.amountMinor, row.rawText, occurrence)
 
     const withHash = { ...row, dedupHash }
 

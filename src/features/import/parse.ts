@@ -185,8 +185,16 @@ function scoreHeader(header: string, hints: string[]): number {
   const h = header.toLowerCase().replace(/\s+/g, ' ').trim()
   let best = 0
   for (const hint of hints) {
-    if (h === hint) best = Math.max(best, 100)
-    else if (h.startsWith(hint)) best = Math.max(best, 80)
+    if (h === hint) {
+      best = Math.max(best, 100)
+      continue
+    }
+    // Very short hints must match the whole header. Matching them as
+    // substrings is actively harmful: "id" appears inside "Tid" — Danish for
+    // time — which is how a time-of-day column got treated as a transaction id.
+    if (hint.length <= 3) continue
+
+    if (h.startsWith(hint)) best = Math.max(best, 80)
     else if (h.includes(hint)) best = Math.max(best, 60)
   }
   return best
@@ -292,10 +300,19 @@ function columnLooksLikeIdentifier(rows: Array<Record<string, string>>, header: 
   const distinct = new Set(values).size
   if (distinct / values.length < 0.9) return false
 
-  // A column of amounts or dates is unique and wordless too. Rule those out
-  // explicitly rather than letting them pass the "not human text" test.
-  const numericish = values.filter((v) => parseAmount(v) !== null || parseDate(v) !== null).length
-  if (numericish / values.length > 0.5) return false
+  // Amounts, dates and clock times are all unique-ish and wordless, so the
+  // "not human text" test alone would accept them. A time-of-day column is the
+  // dangerous one: times are nearly all distinct, so it looks like a perfect
+  // identifier right up until two transactions share a second.
+  const notAnId = values.filter(
+    (v) => parseAmount(v) !== null || parseDate(v) !== null || /^\d{1,2}[:.]\d{2}([:.]\d{2})?$/.test(v.trim()),
+  ).length
+  if (notAnId / values.length > 0.5) return false
+
+  // Real transaction references are long. Anything this short is a code or a
+  // counter, not something to hang duplicate detection on.
+  const longEnough = values.filter((v) => v.trim().length >= 8).length
+  if (longEnough / values.length < 0.8) return false
 
   const idShaped = values.filter((v) => {
     const s = v.trim()

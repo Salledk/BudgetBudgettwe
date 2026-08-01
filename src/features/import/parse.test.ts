@@ -81,6 +81,51 @@ describe('guessMapping', () => {
     expect(m.descriptionColumns).toEqual(['Tekst'])
   })
 
+  it('does not treat a Danish time column as the transaction id', () => {
+    // "Tid" is Danish for time, and contains the substring "id". Matching the
+    // hint loosely picked it as the id column, and because clock times repeat
+    // across days it collided on the unique index and aborted the whole import.
+    const t = table(
+      ['Dato', 'Tid', 'Tekst', 'Beløb', 'Saldo'],
+      [
+        ['2026-06-23', '22:19:05', 'Rejsekort', '-15,20', '19985,26'],
+        ['2026-06-19', '01:19:47', 'Rejsekort', '-11,00', '20000,46'],
+        ['2026-06-18', '02:27:58', 'Rejsekort', '-11,00', '20011,46'],
+        ['2026-06-17', '01:19:47', 'Netto', '-95,00', '20106,46'],
+      ],
+    )
+    const m = guessMapping(t)
+
+    expect(m.idColumn).toBeNull()
+    expect(m.dateColumn).toBe('Dato')
+    expect(m.descriptionColumns).toEqual(['Tekst'])
+  })
+
+  it('does not treat short codes as the transaction id', () => {
+    const t = table(
+      ['Dato', 'Tekst', 'Beløb', 'Kode'],
+      [
+        ['01.08.2026', 'Netto', '-120,24', 'A1B2'],
+        ['02.08.2026', 'Føtex', '-220,00', 'C3D4'],
+        ['03.08.2026', 'Rema', '-90,50', 'E5F6'],
+        ['04.08.2026', 'Lidl', '-45,00', 'G7H8'],
+      ],
+    )
+    expect(guessMapping(t).idColumn).toBeNull()
+  })
+
+  it('still matches an id column named exactly "ID"', () => {
+    const t = table(
+      ['Dato', 'Tekst', 'Beløb', 'ID'],
+      [
+        ['01.08.2026', 'Netto', '-120,24', 'fa5620df-bbd1-458c-94ed-a7543cc3f2f5'],
+        ['02.08.2026', 'Føtex', '-220,00', 'c92a4081-9b95-40c6-a2a8-6a48f9216966'],
+        ['03.08.2026', 'Rema', '-90,50', '14837558-537d-40b0-9fd4-bda70780e579'],
+      ],
+    )
+    expect(guessMapping(t).idColumn).toBe('ID')
+  })
+
   it('does not mistake a description for an id just because it is unique', () => {
     const t = table(
       ['Dato', 'Posteringstekst', 'Beløb'],

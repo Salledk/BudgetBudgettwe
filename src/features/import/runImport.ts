@@ -82,6 +82,20 @@ export async function runImport(params: {
   const categorisedById = new Map(categorised.map((t) => [t.id, t]))
   const finalRows = merged.map((t) => categorisedById.get(t.id) ?? t)
 
+  // Last line of defence. Duplicate fingerprints are prevented above, but if
+  // one ever slips through, the unique index rejects the whole batch with a
+  // Dexie ConstraintError that says nothing a user could act on.
+  const seen = new Set<string>()
+  for (const t of finalRows) {
+    if (seen.has(t.dedupHash)) {
+      throw new Error(
+        'Importen blev afbrudt: filen indeholder rækker der ikke kunne skelnes fra hinanden. ' +
+          'Tjek at kolonnen "Transaktions-ID" er sat rigtigt — vælg "ingen" hvis filen ikke har et id.',
+      )
+    }
+    seen.add(t.dedupHash)
+  }
+
   await db.transaction('rw', db.transactions, db.importBatches, db.rules, async () => {
     await repo.putTransactions([...finalRows, ...existingUpdates])
     await repo.bumpRuleHits(ruleHits)
