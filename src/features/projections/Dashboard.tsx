@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { formatMoneyRounded, formatMoney } from '@/lib/money'
-import { currentMonth, formatMonthLabel } from '@/lib/dates'
+import { formatMonthLabel } from '@/lib/dates'
 import { useAccountBalances, useAppData } from '@/app/useAppData'
 import { Banner, Empty, MonthPicker, ProgressBar, Screen, Spinner } from '@/app/components'
 import { projectMonth, runway } from './project'
@@ -202,7 +202,10 @@ export function Dashboard() {
         </ul>
       </section>
 
-      {month === currentMonth() && projection.categories.length > 0 && (
+      {/* Shown for any month, not just the current one — the breakdown is the
+          main way into a month's transactions, and hiding it for past months
+          made history a dead end. */}
+      {projection.categories.length > 0 && (
         <section className="card">
           <div className="mb-3 flex items-center justify-between">
             <h2 className="font-semibold">Kategorier</h2>
@@ -213,22 +216,28 @@ export function Dashboard() {
           <ul className="space-y-3">
             {projection.categories.slice(0, 6).map((c) => (
               <li key={c.categoryId}>
-                <div className="mb-1 flex items-baseline justify-between text-sm">
-                  <span>
-                    {c.icon} {c.categoryName}
-                  </span>
-                  <span className="tnum text-ink-500">
-                    {formatMoneyRounded(c.actualMinor)}
-                    {c.budgetMinor !== null && ` / ${formatMoneyRounded(c.budgetMinor)}`}
-                  </span>
-                </div>
-                {c.budgetMinor !== null && (
-                  <ProgressBar
-                    ratio={c.actualMinor / c.budgetMinor}
-                    color={c.color}
-                    over={c.status === 'over'}
-                  />
-                )}
+                <Link
+                  to={`/transactions?category=${encodeURIComponent(c.categoryId)}&month=${month}`}
+                  className="block rounded-lg py-0.5 transition active:opacity-60"
+                >
+                  <div className="mb-1 flex items-baseline justify-between text-sm">
+                    <span>
+                      {c.icon} {c.categoryName}
+                      {c.periodic && <span className="ml-1 text-[10px] text-ink-400">PERIODISK</span>}
+                    </span>
+                    <span className="tnum text-ink-500">
+                      {formatMoneyRounded(c.actualMinor)}
+                      {c.budgetMinor !== null && ` / ${formatMoneyRounded(c.budgetMinor)}`}
+                    </span>
+                  </div>
+                  {c.budgetMinor !== null && c.budgetMinor > 0 && (
+                    <ProgressBar
+                      ratio={c.actualMinor / c.budgetMinor}
+                      color={c.color}
+                      over={c.status === 'over'}
+                    />
+                  )}
+                </Link>
               </li>
             ))}
           </ul>

@@ -2,7 +2,7 @@ import { db, isLive } from './db'
 import { newId } from '@/lib/id'
 import { monthOf, type IsoMonth } from '@/lib/dates'
 import { buildSeedAccounts, buildSeedCategories, buildSeedRules } from './seed'
-import { DEFAULT_SETTINGS, type Account, type BankProfile, type Budget, type Category, type ImportBatch, type Rule, type Settings, type Transaction } from './types'
+import { DEFAULT_BUDGET_MONTH, DEFAULT_SETTINGS, type Account, type BankProfile, type Budget, type Category, type ImportBatch, type ResolvedBudget, type Rule, type Settings, type Transaction } from './types'
 
 /**
  * The only module that talks to Dexie. Components and features call these
@@ -135,6 +135,7 @@ export async function createCategory(data: {
   kind: Category['kind']
   icon?: string
   color?: string
+  periodMonths?: number | null
 }): Promise<Category> {
   const categories = await listCategories()
   const category = create({
@@ -145,6 +146,7 @@ export async function createCategory(data: {
     color: data.color ?? '#64748b',
     isSystem: false,
     archived: false,
+    periodMonths: data.periodMonths ?? null,
     sortOrder: (categories.at(-1)?.sortOrder ?? 0) + 10,
   }) as Category
   await db.categories.put(category)
@@ -344,18 +346,52 @@ export async function bumpRuleHits(counts: Map<string, number>): Promise<void> {
 
 // ------------------------------------------------------------------ budgets
 
+/** Rows stored against exactly this month. Never includes the default. */
 export async function listBudgets(month: IsoMonth): Promise<Budget[]> {
   const rows = await db.budgets.where('month').equals(month).toArray()
   return rows.filter(isLive)
 }
 
-export async function budgetMap(month: IsoMonth): Promise<Map<string, Budget>> {
-  const rows = await listBudgets(month)
-  return new Map(rows.map((b) => [b.categoryId, b]))
+/** The standing budget every month inherits. */
+export async function listDefaultBudgets(): Promise<Budget[]> {
+  const rows = await db.budgets.where('month').equals(DEFAULT_BUDGET_MONTH).toArray()
+  return rows.filter(isLive)
+}
+
+/**
+ * The budget in force for a month: the standing budget, with any month-specific
+ * rows laid over it.
+ *
+ * A month row always wins, **including one set to zero** — "nothing budgeted
+ * here this month" has to be expressible, and is different from inheriting.
+ * Deleting the month row reverts the category to the default.
+ *
+ * This is the single place resolution happens; the budget screen and the
+ * projections both read through it.
+ */
+export async function budgetMap(month: IsoMonth): Promise<Map<string, ResolvedBudget>> {
+  const [defaults, monthRows] = await Promise.all([listDefaultBudgets(), listBudgets(month)])
+
+  const out = new Map<string, ResolvedBudget>()
+  for (const b of defaults) out.set(b.categoryId, { ...b, month, inherited: true })
+  for (const b of monthRows) out.set(b.categoryId, { ...b, inherited: false })
+  return out
+}
+
+export async function setDefaultBudget(
+  categoryId: string,
+  amountMinor: number,
+  source: Budget['source'] = 'user',
+): Promise<void> {
+  await setBudget(DEFAULT_BUDGET_MONTH, categoryId, amountMinor, source)
+}
+
+export async function deleteDefaultBudget(categoryId: string): Promise<void> {
+  await deleteBudget(DEFAULT_BUDGET_MONTH, categoryId)
 }
 
 export async function setBudget(
-  month: IsoMonth,
+  month: IsoMonth | typeof DEFAULT_BUDGET_MONTH,
   categoryId: string,
   amountMinor: number,
   source: Budget['source'] = 'user',
@@ -369,7 +405,7 @@ export async function setBudget(
 }
 
 export async function setBudgets(
-  month: IsoMonth,
+  month: IsoMonth | typeof DEFAULT_BUDGET_MONTH,
   entries: Array<{ categoryId: string; amountMinor: number; source?: Budget['source'] }>,
 ): Promise<void> {
   await db.transaction('rw', db.budgets, async () => {
@@ -377,14 +413,29 @@ export async function setBudgets(
   })
 }
 
-export async function deleteBudget(month: IsoMonth, categoryId: string): Promise<void> {
+export async function deleteBudget(
+  month: IsoMonth | typeof DEFAULT_BUDGET_MONTH,
+  categoryId: string,
+): Promise<void> {
   const existing = await db.budgets.where({ month, categoryId }).first()
   if (existing) await db.budgets.put({ ...existing, deletedAt: now(), updatedAt: now() })
 }
 
-/** The most recent month that has any budget set — used to inherit forward. */
+/** True when this month overrides the default for that category. */
+export async function hasMonthOverride(month: IsoMonth, categoryId: string): Promise<boolean> {
+  const row = await db.budgets.where({ month, categoryId }).first()
+  return !!row && isLive(row)
+}
+
+/**
+ * The most recent real month that has any budget set — used to inherit forward.
+ * The default sentinel is excluded: it is not a month and copying "default"
+ * forward would be meaningless.
+ */
 export async function latestBudgetedMonth(before: IsoMonth): Promise<IsoMonth | null> {
-  const rows = (await db.budgets.toArray()).filter(isLive).filter((b) => b.month < before)
+  const rows = (await db.budgets.toArray())
+    .filter(isLive)
+    .filter((b) => b.month !== DEFAULT_BUDGET_MONTH && b.month < before)
   if (rows.length === 0) return null
   return rows.reduce((max, b) => (b.month > max ? b.month : max), rows[0].month)
 }

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { formatDayLabel, monthOf } from '@/lib/dates'
+import { formatDayLabel, formatMonthLabel, monthOf } from '@/lib/dates'
 import { formatMoney } from '@/lib/money'
 import { Banner, Empty, Screen, Sheet, Spinner } from '@/app/components'
 import { useAppData } from '@/app/useAppData'
@@ -22,6 +22,10 @@ export function TransactionList() {
   const [filter, setFilter] = useState<Filter>((params.get('filter') as Filter) ?? 'all')
   const [accountId, setAccountId] = useState<string | 'all'>('all')
   const [search, setSearch] = useState('')
+  // Drill-down from a category total elsewhere in the app. Kept in the URL so
+  // the back button returns to the screen that sent you here.
+  const categoryId = params.get('category')
+  const monthParam = params.get('month')
   const [selection, setSelection] = useState<Set<string>>(new Set())
   const [sheetFor, setSheetFor] = useState<Transaction[] | null>(null)
   const [detail, setDetail] = useState<Transaction | null>(null)
@@ -35,6 +39,8 @@ export function TransactionList() {
 
   const filtered = useMemo(() => {
     let rows = transactions
+    if (categoryId) rows = rows.filter((t) => t.categoryId === categoryId)
+    if (monthParam) rows = rows.filter((t) => monthOf(t.date) === monthParam)
     if (filter === 'uncategorised') rows = rows.filter((t) => t.categoryId === null)
     if (filter === 'review') rows = rows.filter((t) => t.categorySource === 'learned' && !t.reviewed)
     if (filter === 'month') rows = rows.filter((t) => monthOf(t.date) === month)
@@ -44,7 +50,18 @@ export function TransactionList() {
       rows = rows.filter((t) => t.rawText.toLowerCase().includes(q))
     }
     return rows
-  }, [transactions, filter, accountId, search, month])
+  }, [transactions, filter, accountId, search, month, categoryId, monthParam])
+
+  const drilldownTotal = useMemo(
+    () => filtered.reduce((sum, t) => sum + Math.abs(t.amountMinor), 0),
+    [filtered],
+  )
+
+  function clearParam(key: string) {
+    params.delete(key)
+    setParams(params, { replace: true })
+    setLimit(100)
+  }
 
   const visible = filtered.slice(0, limit)
 
@@ -83,6 +100,26 @@ export function TransactionList() {
 
   return (
     <Screen title="Transaktioner">
+      {(categoryId || monthParam) && (
+        <div className="card flex flex-wrap items-center gap-2">
+          <span className="text-sm text-ink-500">Viser</span>
+          {categoryId && (
+            <button type="button" className="chip-on" onClick={() => clearParam('category')}>
+              {categoriesById.get(categoryId)?.icon} {categoriesById.get(categoryId)?.name ?? 'Kategori'} ✕
+            </button>
+          )}
+          {monthParam && (
+            <button type="button" className="chip-on" onClick={() => clearParam('month')}>
+              {formatMonthLabel(monthParam)} ✕
+            </button>
+          )}
+          <span className="tnum ml-auto text-sm font-semibold">{formatMoney(drilldownTotal)}</span>
+          <span className="w-full text-xs text-ink-500">
+            {filtered.length} transaktion{filtered.length === 1 ? '' : 'er'} · tryk på et filter for at fjerne det
+          </span>
+        </div>
+      )}
+
       <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
         <button className={filter === 'all' ? 'chip-on' : 'chip-off'} onClick={() => setFilterAndUrl('all')}>
           Alle

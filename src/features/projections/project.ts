@@ -1,8 +1,9 @@
 import { currentMonth, daysInMonth, elapsedDaysInMonth, monthOf, type IsoMonth } from '@/lib/dates'
 import { median } from '@/lib/stats'
-import type { Budget, Category, Transaction } from '@/data/types'
+import type { Category, ResolvedBudget, Transaction } from '@/data/types'
 import { isTransfer } from '@/features/import/transfers'
 import { monthlyTotals } from '@/features/budget/suggest'
+import { isPeriodic, reserveAt, type ReserveState } from '@/features/budget/periodic'
 
 /**
  * Where the current month will land, per category and overall.
@@ -29,6 +30,12 @@ export interface CategoryProjection {
   /** True when the bill for a recurring category has already been paid. */
   recurringSettled: boolean
   isRecurring: boolean
+  /**
+   * Sinking-fund state for a periodic category. When set, `budgetMinor` is the
+   * monthly set-aside and `remainingMinor` is the reserve balance rather than
+   * budget-minus-spend.
+   */
+  periodic: ReserveState | null
   /** Plain-language line shown in the alerts list. */
   message: string | null
 }
@@ -71,7 +78,7 @@ export function projectMonth(params: {
   month: IsoMonth
   transactions: Transaction[]
   categories: Category[]
-  budgets: Map<string, Budget>
+  budgets: Map<string, ResolvedBudget>
   /** Months of history used to decide recurring vs variable. */
   historyMonths: IsoMonth[]
   now?: Date
@@ -136,7 +143,60 @@ export function projectMonth(params: {
 
     const actualMinor = actualByCategory.get(categoryId) ?? 0
     const budget = budgets.get(categoryId)
-    const budgetMinor = budget ? budget.amountMinor : null
+    const rawBudgetMinor = budget ? budget.amountMinor : null
+
+    /*
+     * A periodic category is judged against what it should be putting aside
+     * each month, not against the whole periodic bill. Comparing a month's
+     * spending to a full annual premium would call eleven months a triumph and
+     * the twelfth a catastrophe, which is exactly the distortion this exists to
+     * remove.
+     */
+    if (isPeriodic(category) && rawBudgetMinor !== null) {
+      const periodMonths = category.periodMonths as number
+      const reserve = reserveAt({
+        month,
+        categoryId,
+        perPeriodMinor: rawBudgetMinor,
+        periodMonths,
+        transactions,
+      })
+
+      /*
+       * Two distinct problems, and neither is "spent a lot this month":
+       *  - the budget is smaller than the bill actually turned out to be
+       *  - the bill is nearly due and not enough has been set aside
+       * Anything else is a fund quietly doing its job.
+       */
+      const status: ProjectionStatus =
+        reserve.shortfallMinor > 0 ? 'over' : reserve.behind ? 'at-risk' : 'on-track'
+
+      const message =
+        reserve.shortfallMinor > 0
+          ? `${category.name}: regningen var ${krLabel(reserve.lastPaymentMinor)} — ${krLabel(reserve.shortfallMinor)} mere end budgetteret.`
+          : reserve.behind
+            ? `${category.name}: regning forventes snart, men der er kun sat ${krLabel(reserve.balanceMinor)} af ${krLabel(reserve.perPeriodMinor)} til side.`
+            : null
+
+      projections.push({
+        categoryId,
+        categoryName: category.name,
+        icon: category.icon,
+        color: category.color,
+        budgetMinor: reserve.setAsideMinor,
+        actualMinor,
+        projectedMinor: reserve.setAsideMinor,
+        remainingMinor: reserve.balanceMinor,
+        status,
+        recurringSettled: reserve.settledThisPeriod,
+        isRecurring: true,
+        periodic: reserve,
+        message,
+      })
+      continue
+    }
+
+    const budgetMinor = rawBudgetMinor
     const isRecurring = recurring.has(categoryId)
 
     const historicalMedian = medianOf(history.get(categoryId), historyMonths)
@@ -165,6 +225,7 @@ export function projectMonth(params: {
       status,
       recurringSettled: isRecurring && actualMinor > 0,
       isRecurring,
+      periodic: null,
       message: messageFor(category.name, actualMinor, projectedMinor, budgetMinor, status),
     })
   }
@@ -266,6 +327,10 @@ function severity(status: ProjectionStatus): number {
     default:
       return 0
   }
+}
+
+function krLabel(minor: number): string {
+  return `${Math.round(minor / 100).toLocaleString('da-DK')} kr`
 }
 
 function messageFor(

@@ -2,6 +2,7 @@ import { monthOf, type IsoMonth } from '@/lib/dates'
 import { coefficientOfVariation, detectOutliers, median, percentile, roundToBudgetFigure, trimmedMean } from '@/lib/stats'
 import type { Category, Transaction } from '@/data/types'
 import { isTransfer } from '@/features/import/transfers'
+import { inferPeriodMonths } from './periodic'
 
 /**
  * Derives a suggested monthly budget from spending history.
@@ -43,6 +44,14 @@ export interface CategorySuggestion {
   oneOffs: Array<{ month: IsoMonth; amountMinor: number }>
   /** Monthly amount to set aside to cover those one-offs over a year. */
   setAsideMinor: number
+  /**
+   * Billing interval inferred from when this category was actually paid, when
+   * the gaps are consistent enough to be trusted. Offered to the user rather
+   * than applied silently — a wrong guess here reshapes the whole budget.
+   */
+  suggestedPeriodMonths: number | null
+  /** Already marked periodic by the user. */
+  periodMonths: number | null
   /** Plain-language reason, shown under the suggestion. */
   rationale: string
 }
@@ -181,6 +190,12 @@ function buildSuggestion(
   const oneOffTotal = oneOffs.reduce((sum, o) => sum + o.amountMinor, 0)
   const setAsideMinor = oneOffs.length > 0 ? roundToBudgetFigure(Math.round(oneOffTotal / 12)) : 0
 
+  // Only offer an interval for categories that genuinely come and go. A
+  // category paid every month is not a sinking fund, however large it is.
+  const paidMonths = history.filter((h) => h.amountMinor > 0).map((h) => h.month)
+  const suggestedPeriodMonths =
+    category.periodMonths === null && pattern !== 'recurring' ? inferPeriodMonths(paidMonths) : null
+
   if (oneOffs.length > 0) {
     rationale += ` ${oneOffs.length} stor${oneOffs.length > 1 ? 'e' : ''} enkeltbetaling${oneOffs.length > 1 ? 'er' : ''} er holdt udenfor.`
   }
@@ -199,6 +214,8 @@ function buildSuggestion(
     monthsConsidered,
     oneOffs,
     setAsideMinor,
+    suggestedPeriodMonths,
+    periodMonths: category.periodMonths ?? null,
     rationale,
   }
 }

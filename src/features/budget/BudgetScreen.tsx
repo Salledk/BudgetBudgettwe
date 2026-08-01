@@ -1,17 +1,31 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { formatMonthLabel } from '@/lib/dates'
 import { formatAmountPlain, formatMoneyRounded, parseUserAmount } from '@/lib/money'
 import { Banner, Empty, MonthPicker, ProgressBar, Screen, Sheet, Sparkline, Spinner } from '@/app/components'
 import { useAppData } from '@/app/useAppData'
 import * as repo from '@/data/repo'
-import { projectMonth } from '@/features/projections/project'
+import { DEFAULT_BUDGET_MONTH } from '@/data/types'
+import { projectMonth, type CategoryProjection } from '@/features/projections/project'
 import { MIN_MONTHS, suggestBudget, type CategorySuggestion } from './suggest'
+import { PERIOD_OPTIONS, monthlySetAside } from './periodic'
+
+/** Which budget is being edited: the standing default, or one month. */
+type Scope = 'default' | 'month'
 
 export function BudgetScreen() {
-  const { loading, transactions, categories, budgets, month, setMonth, historyMonths, refresh } = useAppData()
+  const { loading, transactions, categories, categoriesById, budgets, month, setMonth, historyMonths, refresh } = useAppData()
   const [showSuggest, setShowSuggest] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const [scope, setScope] = useState<Scope>('month')
+  const [defaults, setDefaults] = useState<Map<string, number>>(new Map())
+
+  // The standing budget is not part of the month-scoped app state, so it is
+  // loaded here and refreshed whenever the month view changes underneath it.
+  useEffect(() => {
+    void repo.listDefaultBudgets().then((rows) => setDefaults(new Map(rows.map((b) => [b.categoryId, b.amountMinor]))))
+  }, [budgets])
 
   const projection = useMemo(
     () => projectMonth({ month, transactions, categories, budgets, historyMonths }),
@@ -26,8 +40,28 @@ export function BudgetScreen() {
     const minor = parseUserAmount(text)
     setEditing(null)
     if (minor === null) return
-    if (minor <= 0) await repo.deleteBudget(month, categoryId)
-    else await repo.setBudget(month, categoryId, minor, 'user')
+
+    if (scope === 'default') {
+      if (minor <= 0) await repo.deleteDefaultBudget(categoryId)
+      else await repo.setDefaultBudget(categoryId, minor, 'user')
+    } else if (minor <= 0) {
+      // Zero in a month is a deliberate "nothing here", not a request to fall
+      // back to the standard budget — that is what "Brug standard" is for.
+      await repo.setBudget(month, categoryId, 0, 'user')
+    } else {
+      await repo.setBudget(month, categoryId, minor, 'user')
+    }
+    await refresh()
+  }
+
+  /** Drops this month's override so the category follows the standard again. */
+  async function resetToDefault(categoryId: string) {
+    await repo.deleteBudget(month, categoryId)
+    await refresh()
+  }
+
+  async function setPeriod(categoryId: string, periodMonths: number | null) {
+    await repo.updateCategory(categoryId, { periodMonths })
     await refresh()
   }
 
@@ -83,6 +117,31 @@ export function BudgetScreen() {
 
       {hasBudget && (
         <>
+          {/* A standing budget every month inherits, so an unchanged category
+              never has to be typed in again. */}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className={scope === 'month' ? 'chip-on flex-1' : 'chip-off flex-1'}
+              onClick={() => { setScope('month'); setEditing(null) }}
+            >
+              {formatMonthLabel(month)}
+            </button>
+            <button
+              type="button"
+              className={scope === 'default' ? 'chip-on flex-1' : 'chip-off flex-1'}
+              onClick={() => { setScope('default'); setEditing(null) }}
+            >
+              Standard
+            </button>
+          </div>
+
+          {scope === 'default' && (
+            <Banner tone="info">
+              Standardbudgettet gælder alle måneder. Ret en enkelt måned ved at skifte tilbage — det ændrer kun den måned.
+            </Banner>
+          )}
+
           <section className="card">
             <div className="mb-2 flex items-baseline justify-between">
               <span className="text-sm text-ink-500">Budget i alt</span>
@@ -111,71 +170,131 @@ export function BudgetScreen() {
           </section>
 
           <ul className="space-y-2">
-            {rows.map((c) => (
-              <li key={c.categoryId} className="card">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
-                    <span aria-hidden>{c.icon}</span>
-                    <span className="truncate">{c.categoryName}</span>
-                    {c.isRecurring && <span className="shrink-0 text-[10px] text-ink-400">FAST</span>}
-                  </span>
-                  <button
-                    type="button"
-                    className="tnum shrink-0 rounded-lg bg-ink-100 px-2.5 py-1 text-sm font-semibold dark:bg-ink-800"
-                    onClick={() => {
-                      setEditing(c.categoryId)
-                      setDraft(c.budgetMinor ? formatAmountPlain(c.budgetMinor) : '')
-                    }}
-                  >
-                    {c.budgetMinor === null ? 'Sæt budget' : formatMoneyRounded(c.budgetMinor)}
-                  </button>
-                </div>
+            {rows.map((c) => {
+              const category = categoriesById.get(c.categoryId)
+              const resolved = budgets.get(c.categoryId)
+              const inherited = resolved?.inherited ?? false
+              const shownMinor = scope === 'default' ? (defaults.get(c.categoryId) ?? null) : c.budgetMinor
+              const periodMonths = category?.periodMonths ?? null
 
-                {editing === c.categoryId && (
-                  <div className="mb-2 flex gap-2">
-                    <input
-                      autoFocus
-                      inputMode="decimal"
-                      className="field"
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') void saveBudget(c.categoryId, draft)
-                        if (e.key === 'Escape') setEditing(null)
+              return (
+                <li key={c.categoryId} className="card">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <Link
+                      to={`/transactions?category=${encodeURIComponent(c.categoryId)}&month=${month}`}
+                      className="flex min-w-0 items-center gap-2 text-sm font-medium"
+                    >
+                      <span aria-hidden>{c.icon}</span>
+                      <span className="truncate">{c.categoryName}</span>
+                      {c.periodic ? (
+                        <span className="shrink-0 text-[10px] text-ink-400">
+                          {periodMonths === 12 ? 'ÅRLIG' : periodMonths === 3 ? 'KVARTAL' : 'PERIODISK'}
+                        </span>
+                      ) : (
+                        c.isRecurring && <span className="shrink-0 text-[10px] text-ink-400">FAST</span>
+                      )}
+                    </Link>
+                    <button
+                      type="button"
+                      className="tnum shrink-0 rounded-lg bg-ink-100 px-2.5 py-1 text-sm font-semibold dark:bg-ink-800"
+                      onClick={() => {
+                        setEditing(c.categoryId)
+                        setDraft(shownMinor ? formatAmountPlain(shownMinor) : '')
                       }}
-                    />
-                    <button type="button" className="btn-primary" onClick={() => void saveBudget(c.categoryId, draft)}>
-                      Gem
+                    >
+                      {shownMinor === null ? 'Sæt budget' : formatMoneyRounded(shownMinor)}
                     </button>
                   </div>
-                )}
 
-                <ProgressBar
-                  ratio={c.budgetMinor ? c.actualMinor / c.budgetMinor : 0}
-                  color={c.color}
-                  over={c.status === 'over'}
-                />
-                <div className="mt-1.5 flex justify-between text-xs text-ink-500">
-                  <span className="tnum">{formatMoneyRounded(c.actualMinor)} brugt</span>
-                  {c.remainingMinor !== null && (
-                    <span className={`tnum ${c.remainingMinor < 0 ? 'text-red-600 dark:text-red-400' : ''}`}>
-                      {c.remainingMinor < 0
-                        ? `${formatMoneyRounded(-c.remainingMinor)} over`
-                        : `${formatMoneyRounded(c.remainingMinor)} tilbage`}
-                    </span>
+                  {scope === 'month' && (
+                    <div className="mb-2 flex items-center gap-2 text-xs text-ink-500">
+                      {inherited ? (
+                        <span>Følger standardbudgettet</span>
+                      ) : (
+                        <>
+                          <span>Kun denne måned</span>
+                          <button type="button" className="underline" onClick={() => void resetToDefault(c.categoryId)}>
+                            Brug standard
+                          </button>
+                        </>
+                      )}
+                    </div>
                   )}
-                </div>
-                {c.message && (
-                  <p
-                    className={`mt-2 text-xs ${
-                      c.status === 'over' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'
-                    }`}
-                  >
-                    {c.message}
-                  </p>
-                )}
-              </li>
-            ))}
+
+                  {editing === c.categoryId && (
+                    <div className="mb-2 space-y-2">
+                      <div className="flex gap-2">
+                        <input
+                          autoFocus
+                          inputMode="decimal"
+                          className="field"
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') void saveBudget(c.categoryId, draft)
+                            if (e.key === 'Escape') setEditing(null)
+                          }}
+                        />
+                        <button type="button" className="btn-primary" onClick={() => void saveBudget(c.categoryId, draft)}>
+                          Gem
+                        </button>
+                      </div>
+                      <div>
+                        <span className="label">Betales</span>
+                        <select
+                          className="field"
+                          value={periodMonths ?? 1}
+                          onChange={(e) => void setPeriod(c.categoryId, Number(e.target.value) === 1 ? null : Number(e.target.value))}
+                        >
+                          {PERIOD_OPTIONS.map((o) => (
+                            <option key={o.months} value={o.months}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                        {periodMonths && periodMonths > 1 && (
+                          <p className="mt-1 text-xs text-ink-500">
+                            Beløbet er hele regningen. Der lægges {formatMoneyRounded(monthlySetAside(shownMinor ?? 0, periodMonths))} til side hver måned.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {c.periodic ? (
+                    <PeriodicRow projection={c} />
+                  ) : (
+                    <>
+                      <ProgressBar
+                        ratio={c.budgetMinor ? c.actualMinor / c.budgetMinor : 0}
+                        color={c.color}
+                        over={c.status === 'over'}
+                      />
+                      <div className="mt-1.5 flex justify-between text-xs text-ink-500">
+                        <span className="tnum">{formatMoneyRounded(c.actualMinor)} brugt</span>
+                        {c.remainingMinor !== null && (
+                          <span className={`tnum ${c.remainingMinor < 0 ? 'text-red-600 dark:text-red-400' : ''}`}>
+                            {c.remainingMinor < 0
+                              ? `${formatMoneyRounded(-c.remainingMinor)} over`
+                              : `${formatMoneyRounded(c.remainingMinor)} tilbage`}
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {c.message && (
+                    <p
+                      className={`mt-2 text-xs ${
+                        c.status === 'over' ? 'text-red-600 dark:text-red-400' : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {c.message}
+                    </p>
+                  )}
+                </li>
+              )
+            })}
           </ul>
         </>
       )}
@@ -194,6 +313,35 @@ export function BudgetScreen() {
 }
 
 /**
+ * A periodic category shows its reserve rather than a month-versus-budget bar:
+ * the question is not "did I overspend in January" but "have I put enough aside
+ * to cover the bill when it arrives".
+ */
+function PeriodicRow({ projection }: { projection: CategoryProjection }) {
+  const r = projection.periodic!
+  const ratio = r.perPeriodMinor > 0 ? r.balanceMinor / r.perPeriodMinor : 0
+  const short = r.balanceMinor < 0
+
+  return (
+    <>
+      <ProgressBar ratio={ratio} color={projection.color} over={short} />
+      <div className="mt-1.5 flex justify-between text-xs text-ink-500">
+        <span className="tnum">
+          {short ? 'mangler ' : 'sat til side '}
+          {formatMoneyRounded(Math.abs(r.balanceMinor))} af {formatMoneyRounded(r.perPeriodMinor)}
+        </span>
+        <span className="tnum">{formatMoneyRounded(r.setAsideMinor)}/md</span>
+      </div>
+      {r.nextDueMonth && (
+        <p className="mt-1 text-xs text-ink-500">
+          {r.settledThisPeriod ? 'Betalt. N' : 'N'}æste regning ca. {formatMonthLabel(r.nextDueMonth)}
+        </p>
+      )}
+    </>
+  )
+}
+
+/**
  * Suggestion review. Every figure is editable before it is saved — the
  * suggestion is a starting point derived from habit, not a verdict.
  */
@@ -202,6 +350,8 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const [overrides, setOverrides] = useState<Record<string, number>>({})
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
+  // Categories where the user declined the inferred billing interval.
+  const [periodicOptOut, setPeriodicOptOut] = useState<Set<string>>(new Set())
 
   const suggestion = useMemo(
     () => suggestBudget({ transactions, categories, months: historyMonths }),
@@ -214,18 +364,31 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
     .filter((s) => !excluded.has(s.categoryId))
     .reduce((sum, s) => sum + amountFor(s), 0)
 
-  async function save() {
+  /**
+   * `asDefault` writes the standing budget, which is almost always what is
+   * wanted — a budget derived from months of habit describes a normal month,
+   * not one particular month.
+   */
+  async function save(asDefault: boolean) {
     setBusy(true)
-    await repo.setBudgets(
-      month,
-      suggestion.categories
-        .filter((s) => !excluded.has(s.categoryId) && amountFor(s) > 0)
-        .map((s) => ({
-          categoryId: s.categoryId,
-          amountMinor: amountFor(s),
-          source: (overrides[s.categoryId] !== undefined ? 'user' : 'suggested') as 'user' | 'suggested',
-        })),
-    )
+    const entries = suggestion.categories
+      .filter((s) => !excluded.has(s.categoryId) && amountFor(s) > 0)
+      .map((s) => ({
+        categoryId: s.categoryId,
+        amountMinor: amountFor(s),
+        source: (overrides[s.categoryId] !== undefined ? 'user' : 'suggested') as 'user' | 'suggested',
+      }))
+
+    await repo.setBudgets(asDefault ? DEFAULT_BUDGET_MONTH : month, entries)
+
+    // Accepting a periodic suggestion also records the interval, so the reserve
+    // starts building rather than the category being budgeted flat.
+    for (const s of suggestion.categories) {
+      if (excluded.has(s.categoryId) || !s.suggestedPeriodMonths) continue
+      if (periodicOptOut.has(s.categoryId)) continue
+      await repo.updateCategory(s.categoryId, { periodMonths: s.suggestedPeriodMonths })
+    }
+
     setBusy(false)
     await onSaved()
   }
@@ -313,18 +476,60 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
                       Brug sikkert bud i stedet: {formatMoneyRounded(s.safeMinor)} →
                     </button>
                   )}
+
+                  {s.suggestedPeriodMonths && !off && (
+                    <div className="mt-2 rounded-lg bg-blue-50 px-3 py-2 text-xs dark:bg-blue-950/50">
+                      {periodicOptOut.has(s.categoryId) ? (
+                        <button
+                          type="button"
+                          className="underline"
+                          onClick={() =>
+                            setPeriodicOptOut((prev) => {
+                              const next = new Set(prev)
+                              next.delete(s.categoryId)
+                              return next
+                            })
+                          }
+                        >
+                          Behandl alligevel som periodisk
+                        </button>
+                      ) : (
+                        <>
+                          Ser ud til at blive betalt{' '}
+                          {s.suggestedPeriodMonths === 12
+                            ? 'en gang om året'
+                            : `hver ${s.suggestedPeriodMonths}. måned`}
+                          . Beløbet lægges til side løbende.{' '}
+                          <button
+                            type="button"
+                            className="underline"
+                            onClick={() => setPeriodicOptOut((prev) => new Set(prev).add(s.categoryId))}
+                          >
+                            Nej tak
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </li>
               )
             })}
           </ul>
 
-          <div className="flex gap-2">
-            <button type="button" className="btn-primary flex-1" onClick={save} disabled={busy}>
-              Brug dette budget
+          <div className="space-y-2">
+            {/* A budget built from months of habit describes a normal month, so
+                saving it as the standard is the sensible default. */}
+            <button type="button" className="btn-primary w-full" onClick={() => void save(true)} disabled={busy}>
+              Gem som standardbudget
             </button>
-            <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>
-              Annullér
-            </button>
+            <div className="flex gap-2">
+              <button type="button" className="btn-secondary flex-1" onClick={() => void save(false)} disabled={busy}>
+                Kun {formatMonthLabel(month)}
+              </button>
+              <button type="button" className="btn-ghost" onClick={onClose} disabled={busy}>
+                Annullér
+              </button>
+            </div>
           </div>
         </>
       )}

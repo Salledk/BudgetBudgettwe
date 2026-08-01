@@ -42,6 +42,7 @@ export function category(overrides: Partial<Category> = {}): Category {
     color: '#000000',
     isSystem: false,
     archived: false,
+    periodMonths: null,
     sortOrder: 10,
     updatedAt: 1,
     deletedAt: null,

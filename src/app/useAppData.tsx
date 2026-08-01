@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { currentMonth, lastCompleteMonths, monthOf, type IsoMonth } from '@/lib/dates'
 import * as repo from '@/data/repo'
-import type { Account, Budget, Category, Settings, Transaction } from '@/data/types'
+import type { Account, Category, ResolvedBudget, Settings, Transaction } from '@/data/types'
 
 /**
  * Loads everything once and keeps it in memory.
@@ -16,7 +16,7 @@ interface AppData {
   accounts: Account[]
   categories: Category[]
   transactions: Transaction[]
-  budgets: Map<string, Budget>
+  budgets: Map<string, ResolvedBudget>
   settings: Settings | null
   month: IsoMonth
   setMonth: (m: IsoMonth) => void
@@ -34,7 +34,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [categories, setCategories] = useState<Category[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [budgets, setBudgets] = useState<Map<string, Budget>>(new Map())
+  const [budgets, setBudgets] = useState<Map<string, ResolvedBudget>>(new Map())
   const [settings, setSettings] = useState<Settings | null>(null)
   const [month, setMonth] = useState<IsoMonth>(() => currentMonth())
 

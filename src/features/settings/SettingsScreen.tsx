@@ -5,6 +5,7 @@ import { useAccountBalances, useAppData } from '@/app/useAppData'
 import * as repo from '@/data/repo'
 import type { Account, Category, Rule } from '@/data/types'
 import { recategoriseAll } from '@/features/import/runImport'
+import { PERIOD_OPTIONS } from '@/features/budget/periodic'
 
 type Panel = 'accounts' | 'categories' | 'rules' | 'data' | null
 
@@ -213,7 +214,8 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
     <Sheet open onClose={onClose} title="Kategorier">
       <ul className="mb-3 space-y-1.5">
         {categories.map((c) => (
-          <li key={c.id} className="card flex items-center justify-between gap-2 py-2.5">
+          <li key={c.id} className="card py-2.5">
+            <div className="flex items-center justify-between gap-2">
             <span className="flex min-w-0 items-center gap-2">
               <span aria-hidden>{c.icon}</span>
               <span className="truncate text-sm">{c.name}</span>
@@ -231,6 +233,29 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
               >
                 Slet
               </button>
+            )}
+            </div>
+            {/* Periodic bills are budgeted as a full period's cost and set
+                aside monthly, so the interval belongs with the category. */}
+            {!c.isSystem && c.kind === 'expense' && (
+              <label className="mt-2 flex items-center gap-2 text-xs text-ink-500">
+                Betales
+                <select
+                  className="rounded-lg border border-ink-200 bg-white px-2 py-1 text-xs dark:border-ink-700 dark:bg-ink-800"
+                  value={c.periodMonths ?? 1}
+                  onChange={async (e) => {
+                    const v = Number(e.target.value)
+                    await repo.updateCategory(c.id, { periodMonths: v === 1 ? null : v })
+                    await refresh()
+                  }}
+                >
+                  {PERIOD_OPTIONS.map((o) => (
+                    <option key={o.months} value={o.months}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             )}
           </li>
         ))}

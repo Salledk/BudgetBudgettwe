@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { category, monthlySeries, tx } from '@/test/factories'
-import type { Budget } from '@/data/types'
+import type { ResolvedBudget } from '@/data/types'
 import { detectRecurringCategories, projectMonth, runway } from './project'
 
 const HISTORY = ['2025-10', '2025-11', '2025-12', '2026-01', '2026-02']
@@ -10,13 +10,14 @@ const rent = category({ id: 'rent', name: 'Husleje' })
 const groceries = category({ id: 'groceries', name: 'Dagligvarer' })
 const salary = category({ id: 'salary', name: 'Løn', kind: 'income' })
 
-function budget(categoryId: string, amountMinor: number): Budget {
+function budget(categoryId: string, amountMinor: number): ResolvedBudget {
   return {
     id: `b-${categoryId}`,
     month: MONTH,
     categoryId,
     amountMinor,
     source: 'user',
+    inherited: false,
     updatedAt: 1,
     deletedAt: null,
   }
@@ -306,6 +307,86 @@ describe('projectMonth — month totals', () => {
     expect(result.daysElapsed).toBe(15)
     expect(result.daysTotal).toBe(31)
     expect(result.isCurrentMonth).toBe(true)
+  })
+})
+
+describe('projectMonth — periodic categories', () => {
+  const insurance = category({ id: 'ins', name: 'Forsikring', periodMonths: 12 })
+  // 6.400 kr a year, paid in January.
+  const budgets = new Map([['ins', budget('ins', 640000)]])
+  const paid = monthlySeries('ins', [['2026-01', 640000]])
+
+  it('judges against the monthly set-aside, not the whole bill', () => {
+    const result = projectMonth({
+      month: MONTH, transactions: paid, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+    })
+
+    const p = result.categories.find((c) => c.categoryId === 'ins')!
+    expect(p.periodic).not.toBeNull()
+    expect(p.budgetMinor).toBe(53333)
+    expect(p.periodic!.perPeriodMinor).toBe(640000)
+  })
+
+  it('does not flag the month the bill lands', () => {
+    // The whole point: an annual premium is not a catastrophe in January.
+    const result = projectMonth({
+      month: '2026-01',
+      transactions: paid,
+      categories: [insurance],
+      budgets,
+      historyMonths: HISTORY,
+      now: new Date(2026, 0, 20),
+    })
+
+    const p = result.categories.find((c) => c.categoryId === 'ins')!
+    expect(p.actualMinor).toBe(640000)
+    expect(p.status).not.toBe('over')
+    expect(result.alerts).toHaveLength(0)
+  })
+
+  it('stays quiet for the rest of the year', () => {
+    for (const month of ['2026-03', '2026-06', '2026-09']) {
+      const result = projectMonth({
+        month, transactions: paid, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+      })
+      expect(result.categories.find((c) => c.categoryId === 'ins')!.status).toBe('on-track')
+    }
+  })
+
+  it('flags a bill that outgrew its budget', () => {
+    const bigger = monthlySeries('ins', [['2026-01', 720000]])
+
+    const result = projectMonth({
+      month: MONTH, transactions: bigger, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+    })
+
+    const p = result.categories.find((c) => c.categoryId === 'ins')!
+    expect(p.status).toBe('over')
+    expect(p.message).toContain('mere end budgetteret')
+  })
+
+  it('warns when the next bill is close and the reserve is short', () => {
+    const result = projectMonth({
+      month: '2026-12',
+      transactions: paid,
+      categories: [insurance],
+      budgets,
+      historyMonths: HISTORY,
+      now: new Date(2026, 11, 15),
+    })
+
+    const p = result.categories.find((c) => c.categoryId === 'ins')!
+    expect(p.status).toBe('at-risk')
+    expect(p.message).toContain('til side')
+  })
+
+  it('leaves an unmarked category on the ordinary path', () => {
+    const ordinary = category({ id: 'ins', name: 'Forsikring', periodMonths: null })
+    const result = projectMonth({
+      month: MONTH, transactions: paid, categories: [ordinary], budgets, historyMonths: HISTORY, now: MID_MONTH,
+    })
+
+    expect(result.categories.find((c) => c.categoryId === 'ins')!.periodic).toBeNull()
   })
 })
 

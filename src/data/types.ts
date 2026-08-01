@@ -36,9 +36,18 @@ export interface Category extends BaseRecord {
   color: string
   /** System categories (Transfer, Uncategorised) cannot be deleted. */
   isSystem: boolean
-  /** Recurring bills get budgeted from the median rather than a trimmed mean. */
   archived: boolean
   sortOrder: number
+  /**
+   * Billing interval in months for a periodic expense — 3 for quarterly, 12 for
+   * yearly. `null` for an ordinary category.
+   *
+   * When set, the category's budget holds the **full cost per period** and the
+   * monthly set-aside is derived, so changing the interval can never leave a
+   * stale monthly figure behind. Records written before this field existed read
+   * back as `undefined` and must be treated as `null`.
+   */
+  periodMonths: number | null
 }
 
 /** How a transaction came to have its category. Drives the review queue. */
@@ -84,10 +93,27 @@ export interface Rule extends BaseRecord {
 export type BudgetSource = 'suggested' | 'user'
 
 export interface Budget extends BaseRecord {
-  month: IsoMonth
+  /** A real month, or DEFAULT_BUDGET_MONTH for the standing budget. */
+  month: IsoMonth | typeof DEFAULT_BUDGET_MONTH
   categoryId: string
   amountMinor: Minor
   source: BudgetSource
+}
+
+/**
+ * Sentinel month for the standing budget that every month inherits.
+ *
+ * Stored in the same table as real months so the existing
+ * `&[month+categoryId]` unique index guarantees one default per category, with
+ * no separate table and no migration. It sorts below any real month
+ * ("default" < "2024-.."), which keeps `latestBudgetedMonth` honest.
+ */
+export const DEFAULT_BUDGET_MONTH = 'default'
+
+/** A budget resolved for a month, plus where the figure came from. */
+export interface ResolvedBudget extends Budget {
+  /** True when this month has no row of its own and inherits the default. */
+  inherited: boolean
 }
 
 export interface ImportBatch extends BaseRecord {
