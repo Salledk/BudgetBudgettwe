@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { formatMonthLabel } from '@/lib/dates'
-import { formatAmountPlain, formatMoneyRounded, parseUserAmount } from '@/lib/money'
+import { formatMoneyRounded, parseUserAmount } from '@/lib/money'
 import { Banner, Empty, MonthPicker, ProgressBar, Screen, Sheet, Sparkline, Spinner } from '@/app/components'
 import { useAppData } from '@/app/useAppData'
 import * as repo from '@/data/repo'
@@ -18,6 +18,7 @@ export function BudgetScreen() {
   const [showSuggest, setShowSuggest] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  const [invalid, setInvalid] = useState(false)
   const [scope, setScope] = useState<Scope>('month')
   const [defaults, setDefaults] = useState<Map<string, number>>(new Map())
 
@@ -38,8 +39,14 @@ export function BudgetScreen() {
 
   async function saveBudget(categoryId: string, text: string) {
     const minor = parseUserAmount(text)
+    // Closing the editor on unreadable input silently discarded what was
+    // typed and left the old figure in place, with nothing to explain it.
+    if (minor === null) {
+      setInvalid(true)
+      return
+    }
     setEditing(null)
-    if (minor === null) return
+    setInvalid(false)
 
     if (scope === 'default') {
       if (minor <= 0) await repo.deleteDefaultBudget(categoryId)
@@ -199,7 +206,12 @@ export function BudgetScreen() {
                       className="tnum shrink-0 rounded-lg bg-ink-100 px-2.5 py-1 text-sm font-semibold dark:bg-ink-800"
                       onClick={() => {
                         setEditing(c.categoryId)
-                        setDraft(shownMinor ? formatAmountPlain(shownMinor) : '')
+                        setInvalid(false)
+                        // Plain whole kroner. Seeding the field with a
+                        // formatted "3.700,00" made it awkward to type over and
+                        // left the editor showing a different format from the
+                        // button that opened it.
+                        setDraft(shownMinor ? String(Math.round(shownMinor / 100)) : '')
                       }}
                     >
                       {shownMinor === null ? 'Sæt budget' : formatMoneyRounded(shownMinor)}
@@ -223,41 +235,45 @@ export function BudgetScreen() {
 
                   {editing === c.categoryId && (
                     <div className="mb-2 space-y-2">
-                      <div className="flex gap-2">
-                        <input
-                          autoFocus
-                          inputMode="decimal"
-                          className="field"
-                          value={draft}
-                          onChange={(e) => setDraft(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') void saveBudget(c.categoryId, draft)
-                            if (e.key === 'Escape') setEditing(null)
-                          }}
-                        />
+                      <div className="flex items-center gap-2">
+                        <div className="relative flex-1">
+                          <input
+                            autoFocus
+                            inputMode="decimal"
+                            aria-label={`Budget for ${c.categoryName} i kroner`}
+                            className={`field pr-10 text-right ${invalid ? 'border-red-500' : ''}`}
+                            value={draft}
+                            // Select everything on focus so typing replaces the
+                            // amount instead of being appended to it.
+                            onFocus={(e) => e.currentTarget.select()}
+                            onChange={(e) => {
+                              setDraft(e.target.value)
+                              setInvalid(false)
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') void saveBudget(c.categoryId, draft)
+                              if (e.key === 'Escape') setEditing(null)
+                            }}
+                          />
+                          <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-sm text-ink-400">
+                            kr.
+                          </span>
+                        </div>
                         <button type="button" className="btn-primary" onClick={() => void saveBudget(c.categoryId, draft)}>
                           Gem
                         </button>
+                        <button type="button" className="btn-ghost px-2" onClick={() => setEditing(null)}>
+                          Fortryd
+                        </button>
                       </div>
-                      <div>
-                        <span className="label">Betales</span>
-                        <select
-                          className="field"
-                          value={periodMonths ?? 1}
-                          onChange={(e) => void setPeriod(c.categoryId, Number(e.target.value) === 1 ? null : Number(e.target.value))}
-                        >
-                          {PERIOD_OPTIONS.map((o) => (
-                            <option key={o.months} value={o.months}>
-                              {o.label}
-                            </option>
-                          ))}
-                        </select>
-                        {periodMonths && periodMonths > 1 && (
-                          <p className="mt-1 text-xs text-ink-500">
-                            Beløbet er hele regningen. Der lægges {formatMoneyRounded(monthlySetAside(shownMinor ?? 0, periodMonths))} til side hver måned.
-                          </p>
-                        )}
-                      </div>
+                      {invalid && <p className="text-xs text-red-600">Skriv et beløb, fx 3500.</p>}
+                      {periodMonths && periodMonths > 1 && (
+                        <p className="text-xs text-ink-500">
+                          Beløbet er hele regningen. Der lægges{' '}
+                          {formatMoneyRounded(monthlySetAside(parseUserAmount(draft) ?? shownMinor ?? 0, periodMonths))} til
+                          side hver måned.
+                        </p>
+                      )}
                     </div>
                   )}
 
@@ -291,6 +307,29 @@ export function BudgetScreen() {
                     >
                       {c.message}
                     </p>
+                  )}
+
+                  {/* Kept out of the amount editor: changing how often a bill
+                      arrives is a different decision from typing its size, and
+                      a dropdown appearing mid-edit made entering a number feel
+                      like filling in a form. */}
+                  {category && !category.isSystem && category.kind === 'expense' && (
+                    <label className="mt-2 flex items-center gap-1.5 text-xs text-ink-400">
+                      Betales
+                      <select
+                        className="bg-transparent text-xs text-ink-500 underline"
+                        value={periodMonths ?? 1}
+                        onChange={(e) =>
+                          void setPeriod(c.categoryId, Number(e.target.value) === 1 ? null : Number(e.target.value))
+                        }
+                      >
+                        {PERIOD_OPTIONS.map((o) => (
+                          <option key={o.months} value={o.months}>
+                            {o.label.toLowerCase()}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                   )}
                 </li>
               )
@@ -348,6 +387,8 @@ function PeriodicRow({ projection }: { projection: CategoryProjection }) {
 function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () => Promise<void> }) {
   const { transactions, categories, month, historyMonths } = useAppData()
   const [overrides, setOverrides] = useState<Record<string, number>>({})
+  // Raw text per row, so typing is not fought by reformatting.
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(false)
   // Categories where the user declined the inferred billing interval.
@@ -434,14 +475,23 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
                       <div className="truncate text-sm font-medium">{s.categoryName}</div>
                       <div className="text-xs text-ink-500">{s.rationale}</div>
                     </div>
+                    {/* The text has to be its own state. Deriving the value
+                        from the parsed number reformatted it on every
+                        keystroke, and an unparseable value — an empty field,
+                        mid-edit — was dropped entirely, so the box could not
+                        even be cleared. */}
                     <input
                       inputMode="decimal"
+                      aria-label={`Budget for ${s.categoryName} i kroner`}
                       className="tnum w-28 shrink-0 rounded-lg border border-ink-200 bg-white px-2 py-1.5 text-right
                                  text-sm font-semibold dark:border-ink-700 dark:bg-ink-800"
-                      value={formatAmountPlain(amountFor(s))}
+                      value={drafts[s.categoryId] ?? String(Math.round(amountFor(s) / 100))}
                       disabled={off}
+                      onFocus={(e) => e.currentTarget.select()}
                       onChange={(e) => {
-                        const minor = parseUserAmount(e.target.value)
+                        const text = e.target.value
+                        setDrafts((d) => ({ ...d, [s.categoryId]: text }))
+                        const minor = parseUserAmount(text)
                         if (minor !== null) setOverrides((o) => ({ ...o, [s.categoryId]: minor }))
                       }}
                     />
@@ -471,7 +521,10 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
                     <button
                       type="button"
                       className="mt-2 text-xs text-ink-500"
-                      onClick={() => setOverrides((o) => ({ ...o, [s.categoryId]: s.safeMinor }))}
+                      onClick={() => {
+                        setOverrides((o) => ({ ...o, [s.categoryId]: s.safeMinor }))
+                        setDrafts((d) => ({ ...d, [s.categoryId]: String(Math.round(s.safeMinor / 100)) }))
+                      }}
                     >
                       Brug sikkert bud i stedet: {formatMoneyRounded(s.safeMinor)} →
                     </button>
