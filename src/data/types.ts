@@ -56,6 +56,15 @@ export type CategorySource = 'manual' | 'rule' | 'seed' | 'learned' | 'transfer'
 export interface Transaction extends BaseRecord {
   accountId: string
   date: IsoDay
+  /**
+   * When the amount actually left the account, if the export said so.
+   *
+   * Banks reserve a card amount on one day and draw it a few days later, and
+   * their exports disagree about which of the two `Dato` means: a detailed
+   * export gives both, a simpler one gives only the posting date. Recording
+   * both is what lets the same purchase be recognised across the two formats.
+   */
+  postedDate: IsoDay | null
   amountMinor: Minor
   /** Description exactly as the bank exported it. Never rewritten. */
   rawText: string
@@ -68,7 +77,15 @@ export interface Transaction extends BaseRecord {
   /** Set when this transaction is paired with its opposite on another account. */
   transferGroupId: string | null
   importBatchId: string
+  /** Primary fingerprint, uniquely indexed. The strongest key available. */
   dedupHash: string
+  /**
+   * Every fingerprint this transaction could be recognised by — its id, its
+   * transaction date, and its posting date. A later import counts as a
+   * duplicate when it shares *any* of these, which is what matches a purchase
+   * across two exports that date it differently.
+   */
+  dedupKeys: string[]
   /** The bank's own id for this transaction, when the export provided one. */
   externalId: string | null
   notes: string | null
@@ -139,6 +156,8 @@ export interface BankProfile extends BaseRecord {
   delimiter: string
   dateColumn: string
   dateFormat: DateFormat
+  /** Column holding the posting date, when the export has a second date. */
+  postedDateColumn: string | null
   amountMode: AmountMode
   amountColumn: string | null
   debitColumn: string | null

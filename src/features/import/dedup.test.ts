@@ -9,6 +9,7 @@ function row(overrides: Partial<ParsedRow> = {}): ParsedRow {
     rawText: 'NETTO 1234',
     merchantKey: 'netto',
     balanceAfterMinor: null,
+    postedDate: null,
     externalId: null,
     sourceRow: 2,
     ...overrides,
@@ -156,6 +157,59 @@ describe('splitDuplicates', () => {
 
     const stored = new Set(first.fresh.map((r) => r.dedupHash))
     expect(splitDuplicates(rows, 'acc', stored).duplicates).toHaveLength(2)
+  })
+
+  it('recognises a purchase across exports that date it differently', () => {
+    // A card amount is reserved on one day and drawn a few days later. The
+    // detailed export prints both dates; the simpler one prints only the
+    // posting date. Keyed on a single date these look like two purchases —
+    // on one real account, 199 of them did.
+    const detailed = row({ date: '2025-07-08', postedDate: '2025-07-09', amountMinor: -45000, rawText: 'Auto bilsyn' })
+    const simple = row({ date: '2025-07-09', postedDate: null, amountMinor: -45000, rawText: 'Auto bilsyn' })
+
+    const stored = new Set(splitDuplicates([detailed], 'acc', new Set()).fresh.flatMap((r) => r.dedupKeys))
+    const second = splitDuplicates([simple], 'acc', stored)
+
+    expect(second.duplicates).toHaveLength(1)
+    expect(second.fresh).toHaveLength(0)
+  })
+
+  it('recognises it in the other import order too', () => {
+    const detailed = row({ date: '2025-07-08', postedDate: '2025-07-09', amountMinor: -45000, rawText: 'Auto bilsyn' })
+    const simple = row({ date: '2025-07-09', postedDate: null, amountMinor: -45000, rawText: 'Auto bilsyn' })
+
+    const stored = new Set(splitDuplicates([simple], 'acc', new Set()).fresh.flatMap((r) => r.dedupKeys))
+    expect(splitDuplicates([detailed], 'acc', stored).duplicates).toHaveLength(1)
+  })
+
+  it('bridges the two formats even when only one carries a bank id', () => {
+    // The formats do not share ids, so the id alone cannot link them — the
+    // date-derived keys have to be present alongside it.
+    const withId = row({ date: '2025-07-09', externalId: 'abc-123', amountMinor: -45000, rawText: 'Auto bilsyn' })
+    const withDates = row({ date: '2025-07-08', postedDate: '2025-07-09', amountMinor: -45000, rawText: 'Auto bilsyn' })
+
+    const stored = new Set(splitDuplicates([withDates], 'acc', new Set()).fresh.flatMap((r) => r.dedupKeys))
+    expect(splitDuplicates([withId], 'acc', stored).duplicates).toHaveLength(1)
+  })
+
+  it('does not merge two real purchases that merely fall a day apart', () => {
+    // Circle K at 64,00 on consecutive days is a real pattern in this data;
+    // only a shared posting date makes them the same purchase.
+    const monday = row({ date: '2026-04-07', postedDate: '2026-04-07', amountMinor: -6400, rawText: 'Circle K' })
+    const tuesday = row({ date: '2026-04-08', postedDate: '2026-04-08', amountMinor: -6400, rawText: 'Circle K' })
+
+    const { fresh } = splitDuplicates([monday, tuesday], 'acc', new Set())
+    expect(fresh).toHaveLength(2)
+  })
+
+  it('ignores a posting date identical to the transaction date', () => {
+    const r = splitDuplicates(
+      [row({ date: '2026-03-15', postedDate: '2026-03-15' })],
+      'acc',
+      new Set(),
+    ).fresh[0]
+    // No point carrying the same key twice.
+    expect(r.dedupKeys).toHaveLength(1)
   })
 
   it('scopes duplicates to one account', () => {

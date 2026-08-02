@@ -21,6 +21,8 @@ export interface ParsedRow {
   rawText: string
   merchantKey: string
   balanceAfterMinor: number | null
+  /** When the amount actually left the account, when the export says so. */
+  postedDate: string | null
   /** The bank's own transaction id, when the export supplied one. */
   externalId: string | null
   /** Index in the source file, for error reporting. */
@@ -171,6 +173,15 @@ export function signatureOf(headers: string[]): string {
 // ------------------------------------------------------------- auto-mapping
 
 const DATE_HINTS = ['bogføringsdato', 'bogforingsdato', 'dato', 'date', 'transaktionsdato', 'valørdato', 'valordato', 'posteringsdato', 'rentedato']
+/**
+ * A second date column meaning "when it actually left the account". Only
+ * consulted after the primary date column has been claimed, so an export with
+ * a single date is unaffected.
+ */
+const POSTED_DATE_HINTS = [
+  'posteringsdato', 'bogføringsdato', 'bogforingsdato', 'valørdato', 'valordato',
+  'posting date', 'booked', 'bogført',
+]
 const TEXT_HINTS = ['tekst', 'beskrivelse', 'posteringstekst', 'description', 'meddelelse', 'detaljer', 'text', 'modtager', 'afsender', 'narrative']
 const AMOUNT_HINTS = ['beløb', 'belob', 'amount', 'beløb i dkk', 'transaktionsbeløb', 'value']
 const BALANCE_HINTS = ['saldo', 'balance', 'saldo efter', 'bogført saldo']
@@ -228,6 +239,12 @@ export function guessMapping(table: RawTable): ColumnMapping {
 
   const balanceColumn = pickColumn(headers, BALANCE_HINTS)
 
+  // A second date column, if the export distinguishes reservation from posting.
+  // Verified against real content so a stray column named like a date but full
+  // of something else cannot become one.
+  const postedCandidate = pickColumn(headers, POSTED_DATE_HINTS, [dateColumn, balanceColumn ?? ''])
+  const postedDateColumn = postedCandidate && columnLooksLikeDate(sample, postedCandidate) ? postedCandidate : null
+
   const debitColumn = pickColumn(headers, DEBIT_HINTS, [dateColumn, balanceColumn ?? ''])
   const creditColumn = pickColumn(headers, CREDIT_HINTS, [dateColumn, balanceColumn ?? '', debitColumn ?? ''])
 
@@ -249,14 +266,14 @@ export function guessMapping(table: RawTable): ColumnMapping {
    * folding a UUID into the description gives every transaction a unique
    * merchant key, which defeats categorisation entirely.
    */
-  const claimed = [dateColumn, balanceColumn, amountColumn, debitColumn, creditColumn].filter(Boolean) as string[]
+  const claimed = [dateColumn, postedDateColumn, balanceColumn, amountColumn, debitColumn, creditColumn].filter(Boolean) as string[]
   const idColumn =
     pickColumn(headers, ID_HINTS, claimed) ??
     headers.find((h) => !claimed.includes(h) && columnLooksLikeIdentifier(sample, h)) ??
     null
 
   const used = new Set(
-    [dateColumn, balanceColumn, amountColumn, debitColumn, creditColumn, idColumn].filter(Boolean) as string[],
+    [dateColumn, postedDateColumn, balanceColumn, amountColumn, debitColumn, creditColumn, idColumn].filter(Boolean) as string[],
   )
   let descriptionColumns = headers.filter((h) => !used.has(h) && scoreHeader(h, TEXT_HINTS) > 0)
   if (descriptionColumns.length === 0) {
@@ -272,6 +289,7 @@ export function guessMapping(table: RawTable): ColumnMapping {
     delimiter: table.delimiter,
     dateColumn,
     dateFormat,
+    postedDateColumn,
     amountMode,
     amountColumn: amountMode === 'single' ? amountColumn : null,
     debitColumn: amountMode === 'debit-credit' ? debitColumn : null,
@@ -390,6 +408,11 @@ export function applyMapping(
       ? parseAmount(raw[mapping.balanceColumn] ?? '', { decimalSeparator: mapping.decimalSeparator })
       : null
 
+    // The second date may be written in a different format from the first, so
+    // fall back to auto-detection rather than forcing the primary format.
+    const postedRaw = mapping.postedDateColumn ? (raw[mapping.postedDateColumn] ?? '') : ''
+    const postedDate = postedRaw ? (parseDate(postedRaw, mapping.dateFormat) ?? parseDate(postedRaw)) : null
+
     const externalId = mapping.idColumn ? (raw[mapping.idColumn] ?? '').trim() || null : null
 
     rows.push({
@@ -398,6 +421,7 @@ export function applyMapping(
       rawText: rawText || '(ingen tekst)',
       merchantKey: merchantKey(rawText),
       balanceAfterMinor,
+      postedDate,
       externalId,
       sourceRow,
     })

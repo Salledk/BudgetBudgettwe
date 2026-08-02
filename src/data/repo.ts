@@ -263,10 +263,23 @@ export async function updateTransaction(id: string, patch: Partial<Transaction>)
   await db.transactions.put({ ...current, ...patch, id, updatedAt: now() })
 }
 
-/** All live dedup hashes for an account — the import path's duplicate check. */
+/**
+ * Every fingerprint already stored for an account — the import path's
+ * duplicate check.
+ *
+ * Returns the union of each transaction's keys rather than just its primary
+ * one, so a purchase can be recognised by its id, its transaction date or its
+ * posting date. Rows written before multiple keys existed only have
+ * `dedupHash`, which still works.
+ */
 export async function existingDedupHashes(accountId: string): Promise<Set<string>> {
   const rows = await db.transactions.where('accountId').equals(accountId).toArray()
-  return new Set(rows.filter(isLive).map((t) => t.dedupHash))
+  const keys = new Set<string>()
+  for (const t of rows) {
+    if (!isLive(t)) continue
+    for (const k of t.dedupKeys ?? [t.dedupHash]) keys.add(k)
+  }
+  return keys
 }
 
 /** Distinct merchant keys with a user-confirmed category — feeds the learned layer. */

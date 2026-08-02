@@ -403,6 +403,23 @@ function MappingWizard({
           </div>
         </Field>
 
+        <Field label="Bogført/posteringsdato (valgfri)">
+          <select
+            className="field"
+            value={mapping.postedDateColumn ?? ''}
+            onChange={(e) => set({ postedDateColumn: e.target.value || null })}
+          >
+            <option value="">— ingen —</option>
+            {table.headers.map((h) => (
+              <option key={h} value={h}>{h}</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-ink-500">
+            Nogle udtræk har både datoen hvor beløbet blev reserveret og hvor det blev trukket. Sæt begge, så
+            genkendes den samme betaling på tværs af udtræk.
+          </p>
+        </Field>
+
         <Field label="Saldo (valgfri)">
           <select
             className="field"
@@ -493,6 +510,7 @@ function toMapping(profile: {
   delimiter: string
   dateColumn: string
   dateFormat: ColumnMapping['dateFormat']
+  postedDateColumn?: string | null
   amountMode: ColumnMapping['amountMode']
   amountColumn: string | null
   debitColumn: string | null
@@ -508,6 +526,8 @@ function toMapping(profile: {
     delimiter: profile.delimiter,
     dateColumn: profile.dateColumn,
     dateFormat: profile.dateFormat,
+    // Older saved profiles predate posting-date support.
+    postedDateColumn: profile.postedDateColumn ?? null,
     amountMode: profile.amountMode,
     amountColumn: profile.amountColumn,
     debitColumn: profile.debitColumn,

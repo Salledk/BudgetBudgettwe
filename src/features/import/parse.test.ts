@@ -101,6 +101,43 @@ describe('guessMapping', () => {
     expect(m.descriptionColumns).toEqual(['Tekst'])
   })
 
+  it('picks up a separate posting-date column', () => {
+    // The reservation date and the date the money actually left differ on most
+    // rows of this export, which is what made the same purchase import twice.
+    const t = table(
+      ['Dato', 'Tid', 'Posteringsdato', 'Posteringstid', 'Tekst', 'Beløb', 'Saldo'],
+      [
+        ['2025-07-08', '11:04', '2025-07-09', '18:47', 'Auto bilsyn', '-450,00', '19985,26'],
+        ['2026-05-01', '09:12', '2026-05-03', '17:01', 'Callme', '-503,50', '19481,76'],
+        ['2026-04-01', '08:00', '2026-04-02', '16:20', 'OiSTER', '-47,20', '19434,56'],
+      ],
+    )
+    const m = guessMapping(t)
+
+    expect(m.dateColumn).toBe('Dato')
+    expect(m.postedDateColumn).toBe('Posteringsdato')
+    // Neither date should be mistaken for the description.
+    expect(m.descriptionColumns).toEqual(['Tekst'])
+
+    const { rows } = applyMapping(t, m)
+    expect(rows[0].date).toBe('2025-07-08')
+    expect(rows[0].postedDate).toBe('2025-07-09')
+  })
+
+  it('leaves the posting date unset when the export has only one date', () => {
+    const t = table(
+      ['Dato', 'Titel', 'Beløb', 'Saldo'],
+      [
+        ['09.07.2025', 'Auto bilsyn', '-450,00', '19985,26'],
+        ['10.07.2025', 'Netto', '-120,00', '19865,26'],
+      ],
+    )
+    const m = guessMapping(t)
+
+    expect(m.postedDateColumn).toBeNull()
+    expect(applyMapping(t, m).rows[0].postedDate).toBeNull()
+  })
+
   it('does not treat short codes as the transaction id', () => {
     const t = table(
       ['Dato', 'Tekst', 'Beløb', 'Kode'],
