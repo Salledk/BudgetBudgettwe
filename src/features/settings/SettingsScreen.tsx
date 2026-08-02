@@ -204,11 +204,39 @@ const KIND_LABEL: Record<Account['kind'], string> = {
   other: 'Anden konto',
 }
 
+const CATEGORY_KINDS: Array<{ value: Category['kind']; label: string }> = [
+  { value: 'expense', label: 'Udgift' },
+  { value: 'income', label: 'Indkomst' },
+  { value: 'savings', label: 'Opsparing' },
+]
+
 function CategoriesPanel({ onClose }: { onClose: () => void }) {
   const { categories, refresh } = useAppData()
   const [name, setName] = useState('')
   const [kind, setKind] = useState<Category['kind']>('expense')
   const [icon, setIcon] = useState('📦')
+
+  const [editing, setEditing] = useState<string | null>(null)
+  const [draft, setDraft] = useState({ name: '', icon: '', kind: 'expense' as Category['kind'] })
+
+  function startEdit(c: Category) {
+    setEditing(c.id)
+    setDraft({ name: c.name, icon: c.icon, kind: c.kind })
+  }
+
+  async function saveEdit(c: Category) {
+    const trimmed = draft.name.trim()
+    if (!trimmed) return
+    await repo.updateCategory(c.id, {
+      name: trimmed,
+      icon: draft.icon.trim() || c.icon,
+      // A system category's kind drives how transfers are excluded from every
+      // total, so it stays fixed even while its label can be changed.
+      kind: c.isSystem ? c.kind : draft.kind,
+    })
+    setEditing(null)
+    await refresh()
+  }
 
   return (
     <Sheet open onClose={onClose} title="Kategorier">
@@ -216,11 +244,17 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
         {categories.map((c) => (
           <li key={c.id} className="card py-2.5">
             <div className="flex items-center justify-between gap-2">
-            <span className="flex min-w-0 items-center gap-2">
+            <button
+              type="button"
+              className="flex min-w-0 flex-1 items-center gap-2 text-left"
+              onClick={() => (editing === c.id ? setEditing(null) : startEdit(c))}
+            >
               <span aria-hidden>{c.icon}</span>
               <span className="truncate text-sm">{c.name}</span>
-              {c.isSystem && <span className="shrink-0 text-[10px] text-ink-400">SYSTEM</span>}
-            </span>
+              <span className="shrink-0 text-[10px] text-ink-400">
+                {c.isSystem ? 'SYSTEM' : CATEGORY_KINDS.find((k) => k.value === c.kind)?.label.toUpperCase()}
+              </span>
+            </button>
             {!c.isSystem && (
               <button
                 type="button"
@@ -235,6 +269,56 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
               </button>
             )}
             </div>
+
+            {editing === c.id && (
+              <div className="mt-2 space-y-2">
+                <div className="flex gap-2">
+                  <input
+                    className="field w-16 text-center"
+                    value={draft.icon}
+                    aria-label="Ikon"
+                    onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value.slice(0, 2) }))}
+                  />
+                  <input
+                    autoFocus
+                    className="field flex-1"
+                    value={draft.name}
+                    aria-label={`Navn på ${c.name}`}
+                    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void saveEdit(c)
+                      if (e.key === 'Escape') setEditing(null)
+                    }}
+                  />
+                </div>
+                {!c.isSystem && (
+                  <select
+                    className="field"
+                    value={draft.kind}
+                    aria-label="Type"
+                    onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Category['kind'] }))}
+                  >
+                    {CATEGORY_KINDS.map((k) => (
+                      <option key={k.value} value={k.value}>{k.label}</option>
+                    ))}
+                  </select>
+                )}
+                {!c.isSystem && draft.kind !== c.kind && (
+                  <p className="text-xs text-amber-600">
+                    Skifter du type, flytter kategoriens transaktioner mellem indkomst og udgift.
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <button type="button" className="btn-primary flex-1" onClick={() => void saveEdit(c)}>
+                    Gem
+                  </button>
+                  <button type="button" className="btn-ghost" onClick={() => setEditing(null)}>
+                    Fortryd
+                  </button>
+                </div>
+              </div>
+            )}
             {/* Periodic bills are budgeted as a full period's cost and set
                 aside monthly, so the interval belongs with the category. */}
             {!c.isSystem && c.kind === 'expense' && (
@@ -273,9 +357,9 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
           <input className="field flex-1" value={name} onChange={(e) => setName(e.target.value)} placeholder="Navn" />
         </div>
         <select className="field" value={kind} onChange={(e) => setKind(e.target.value as Category['kind'])}>
-          <option value="expense">Udgift</option>
-          <option value="income">Indkomst</option>
-          <option value="savings">Opsparing</option>
+          {CATEGORY_KINDS.map((k) => (
+            <option key={k.value} value={k.value}>{k.label}</option>
+          ))}
         </select>
         <button
           type="button"
@@ -303,18 +387,54 @@ function RulesPanel({
   onClose: () => void
   onChanged: (rules: Rule[]) => void
 }) {
-  const { categoriesById, refresh } = useAppData()
+  const { categories, categoriesById, refresh } = useAppData()
   const [showSeed, setShowSeed] = useState(false)
+  const [search, setSearch] = useState('')
+  const [editing, setEditing] = useState<string | null>(null)
+  const [draft, setDraft] = useState({ pattern: '', categoryId: '', matchType: 'contains' as Rule['matchType'] })
+  const [adding, setAdding] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const assignable = categories.filter((c) => !c.archived)
 
   const userRules = rules.filter((r) => r.source === 'user')
   const seedRules = rules.filter((r) => r.source === 'seed')
-  const shown = showSeed ? [...userRules, ...seedRules] : userRules
+  const q = search.trim().toLowerCase()
+  const shown = (showSeed || q ? [...userRules, ...seedRules] : userRules).filter(
+    (r) =>
+      !q ||
+      r.pattern.toLowerCase().includes(q) ||
+      (categoriesById.get(r.categoryId)?.name ?? '').toLowerCase().includes(q),
+  )
 
-  async function remove(id: string) {
-    await repo.deleteRule(id)
+  /**
+   * Rules only matter through the transactions they touch, so every change is
+   * followed by a re-run. Manual choices are left alone by design.
+   */
+  async function applyAndReport(action: () => Promise<void>) {
+    setBusy(true)
+    await action()
+    const changed = await recategoriseAll()
     onChanged(await repo.listAllRules())
     await refresh()
+    setBusy(false)
+    setNote(`${changed} transaktion${changed === 1 ? '' : 'er'} blev kategoriseret igen.`)
   }
+
+  function startEdit(r: Rule) {
+    setAdding(false)
+    setEditing(r.id)
+    setDraft({ pattern: r.pattern, categoryId: r.categoryId, matchType: r.matchType })
+  }
+
+  function startAdd() {
+    setEditing(null)
+    setAdding(true)
+    setDraft({ pattern: '', categoryId: assignable[0]?.id ?? '', matchType: 'contains' })
+  }
+
+  const draftValid = draft.pattern.trim().length >= 2 && draft.categoryId !== ''
 
   return (
     <Sheet open onClose={onClose} title="Regler">
@@ -322,35 +442,136 @@ function RulesPanel({
         Regler kategoriserer automatisk. Dine egne regler vinder altid over de indbyggede.
       </p>
 
-      {userRules.length === 0 && !showSeed && (
+      {note && <Banner tone="success">{note}</Banner>}
+
+      {userRules.length === 0 && !showSeed && !q && (
         <Banner tone="info">
           Du har ingen egne regler endnu. De oprettes når du kategoriserer en transaktion og siger ja til at huske
-          valget.
+          valget — eller lav en her.
         </Banner>
+      )}
+
+      <input
+        type="search"
+        className="field my-3"
+        placeholder="Søg i regler…"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      {(adding || editing) && (
+        <div className="card mb-3 space-y-3">
+          <h3 className="font-semibold">{adding ? 'Ny regel' : 'Ret regel'}</h3>
+          <div>
+            <label className="label" htmlFor="rule-pattern">Tekst der skal matches</label>
+            <input
+              id="rule-pattern"
+              autoFocus
+              className="field"
+              value={draft.pattern}
+              placeholder="fx netto"
+              onFocus={(e) => e.currentTarget.select()}
+              onChange={(e) => setDraft((d) => ({ ...d, pattern: e.target.value }))}
+            />
+            <p className="mt-1 text-xs text-ink-500">
+              Matcher fra starten af et ord, så «netto» rammer «NETTO 1234» men ikke «minetto».
+            </p>
+          </div>
+          <div>
+            <label className="label" htmlFor="rule-cat">Kategori</label>
+            <select
+              id="rule-cat"
+              className="field"
+              value={draft.categoryId}
+              onChange={(e) => setDraft((d) => ({ ...d, categoryId: e.target.value }))}
+            >
+              {assignable.map((c) => (
+                <option key={c.id} value={c.id}>{c.icon} {c.name}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="rule-match">Match</label>
+            <select
+              id="rule-match"
+              className="field"
+              value={draft.matchType}
+              onChange={(e) => setDraft((d) => ({ ...d, matchType: e.target.value as Rule['matchType'] }))}
+            >
+              <option value="contains">Indeholder teksten</option>
+              <option value="exact">Præcis denne butik</option>
+              <option value="regex">Regulært udtryk</option>
+            </select>
+          </div>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn-primary flex-1"
+              disabled={!draftValid || busy}
+              onClick={() =>
+                void applyAndReport(async () => {
+                  if (adding) {
+                    await repo.createRule({
+                      pattern: draft.pattern,
+                      categoryId: draft.categoryId,
+                      matchType: draft.matchType,
+                    })
+                  } else if (editing) {
+                    await repo.updateRule(editing, {
+                      pattern: draft.pattern.trim().toLowerCase(),
+                      categoryId: draft.categoryId,
+                      matchType: draft.matchType,
+                    })
+                  }
+                  setEditing(null)
+                  setAdding(false)
+                })
+              }
+            >
+              {busy ? 'Arbejder…' : 'Gem'}
+            </button>
+            <button type="button" className="btn-ghost" onClick={() => { setEditing(null); setAdding(false) }}>
+              Fortryd
+            </button>
+          </div>
+        </div>
       )}
 
       <ul className="my-3 space-y-1.5">
         {shown.map((r) => (
-          <li key={r.id} className="card flex items-center justify-between gap-2 py-2.5">
-            <span className="min-w-0">
-              <span className="block truncate text-sm">
-                «{r.pattern}» → {categoriesById.get(r.categoryId)?.name ?? '?'}
-              </span>
-              <span className="text-xs text-ink-500">
-                {r.source === 'user' ? 'din regel' : 'indbygget'}
-                {r.hitCount > 0 && ` · brugt ${r.hitCount}×`}
-              </span>
-            </span>
-            <button type="button" className="shrink-0 text-xs text-red-600" onClick={() => remove(r.id)}>
-              Slet
-            </button>
+          <li key={r.id} className="card py-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <button type="button" className="min-w-0 flex-1 text-left" onClick={() => startEdit(r)}>
+                <span className="block truncate text-sm">
+                  «{r.pattern}» → {categoriesById.get(r.categoryId)?.name ?? '?'}
+                </span>
+                <span className="text-xs text-ink-500">
+                  {r.source === 'user' ? 'din regel' : 'indbygget'}
+                  {r.matchType !== 'contains' && ` · ${r.matchType}`}
+                  {r.hitCount > 0 && ` · brugt ${r.hitCount}×`}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="shrink-0 text-xs text-red-600"
+                disabled={busy}
+                onClick={() => void applyAndReport(() => repo.deleteRule(r.id))}
+              >
+                Slet
+              </button>
+            </div>
           </li>
         ))}
       </ul>
 
-      <button type="button" className="btn-secondary w-full" onClick={() => setShowSeed((s) => !s)}>
-        {showSeed ? 'Skjul indbyggede regler' : `Vis ${seedRules.length} indbyggede regler`}
-      </button>
+      <div className="flex gap-2">
+        <button type="button" className="btn-primary flex-1" onClick={startAdd} disabled={busy}>
+          + Ny regel
+        </button>
+        <button type="button" className="btn-secondary" onClick={() => setShowSeed((s) => !s)}>
+          {showSeed || q ? 'Skjul indbyggede' : `Vis ${seedRules.length} indbyggede`}
+        </button>
+      </div>
     </Sheet>
   )
 }
