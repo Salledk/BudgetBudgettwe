@@ -7,11 +7,11 @@ import { Banner, Empty, MonthPicker, ProgressBar, Screen, Spinner } from '@/app/
 import { projectMonth, runway } from './project'
 
 export function Dashboard() {
-  const { loading, transactions, categories, budgets, month, setMonth, historyMonths, accounts } = useAppData()
+  const { loading, transactions, categories, budgets, pots, month, setMonth, historyMonths, accounts } = useAppData()
   const balances = useAccountBalances()
 
   const projection = useMemo(
-    () => projectMonth({ month, transactions, categories, budgets, historyMonths }),
+    () => projectMonth({ month, transactions, categories, budgets, pots, historyMonths }),
     [month, transactions, categories, budgets, historyMonths],
   )
 
@@ -223,7 +223,7 @@ export function Dashboard() {
                   <div className="mb-1 flex items-baseline justify-between text-sm">
                     <span>
                       {c.icon} {c.categoryName}
-                      {c.periodic && <span className="ml-1 text-[10px] text-ink-400">PERIODISK</span>}
+                      {c.pot && <span className="ml-1 text-[10px] text-ink-400">OPSPARING</span>}
                     </span>
                     <span className="tnum text-ink-500">
                       {formatMoneyRounded(c.actualMinor)}

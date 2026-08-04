@@ -23,6 +23,7 @@ import * as repo from '@/data/repo'
 import type { Account, Category, Rule } from '@/data/types'
 import { recategoriseAll } from '@/features/import/runImport'
 import { PERIOD_OPTIONS, isPeriodic } from '@/features/budget/periodic'
+import { currentMonth } from '@/lib/dates'
 
 type Panel = 'accounts' | 'categories' | 'rules' | 'data' | null
 
@@ -243,9 +244,13 @@ function groupKeyOf(kind: Category['kind']): string {
 }
 
 /** Same wording the budget screen uses, so one setting reads the same in both. */
-function periodicBadge(c: Category): string | null {
-  if (!isPeriodic(c)) return null
-  return c.periodMonths === 12 ? 'ÅRLIG' : c.periodMonths === 3 ? 'KVARTAL' : 'PERIODISK'
+function savingsBadge(c: Category): string | null {
+  if (!c.rollover) return null
+  return isPeriodic(c) ? `OPSPARING · ${intervalLabel(c.periodMonths)}` : 'OPSPARING'
+}
+
+function intervalLabel(months: number | null): string {
+  return PERIOD_OPTIONS.find((o) => o.months === months)?.label.toLowerCase() ?? 'ikke fast'
 }
 
 interface CategoryDraft {
@@ -253,6 +258,7 @@ interface CategoryDraft {
   icon: string
   kind: Category['kind']
   periodMonths: number | null
+  rollover: boolean
 }
 
 /**
@@ -294,6 +300,7 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
     icon: '',
     kind: 'expense',
     periodMonths: null,
+    rollover: false,
   })
 
   // Holds the new order between the drop and the reload, so a dragged row does
@@ -317,22 +324,33 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
 
   function startEdit(c: Category) {
     setEditing(c.id)
-    setDraft({ name: c.name, icon: c.icon, kind: c.kind, periodMonths: c.periodMonths ?? null })
+    setDraft({
+      name: c.name,
+      icon: c.icon,
+      kind: c.kind,
+      periodMonths: c.periodMonths ?? null,
+      rollover: c.rollover ?? false,
+    })
   }
 
   async function saveEdit(c: Category) {
     const trimmed = draft.name.trim()
     if (!trimmed) return
     const kindNow = c.isSystem ? c.kind : draft.kind
+    // Only an expense saves up, so moving a category out of Udgift clears both
+    // rather than leaving them set but inert.
+    const rollover = kindNow === 'expense' && draft.rollover
     await repo.updateCategory(c.id, {
       name: trimmed,
       icon: draft.icon.trim() || c.icon,
       // A system category's kind drives how transfers are excluded from every
       // total, so it stays fixed even while its label can be changed.
       kind: kindNow,
-      // Only an expense has a bill to spread, so moving a category out of
-      // Udgift clears the interval rather than leaving it set but inert.
-      periodMonths: kindNow === 'expense' ? draft.periodMonths : null,
+      rollover,
+      // Accrual starts when the pot is opened. Switching rollover off and on
+      // again deliberately starts over rather than resurrecting an old balance.
+      rolloverSince: rollover ? (c.rolloverSince ?? currentMonth()) : null,
+      periodMonths: rollover ? draft.periodMonths : null,
     })
     setEditing(null)
     await refresh()
@@ -450,7 +468,7 @@ function CategoryRow({
     id: c.id,
     disabled: c.isSystem,
   })
-  const badge = periodicBadge(c)
+  const badge = savingsBadge(c)
 
   return (
     <li
@@ -531,35 +549,50 @@ function CategoryRow({
             </p>
           )}
 
-          {/* Only an expense has a recurring bill to spread. Reading the staged
+          {/* Only an expense has anything to save toward. Reading the staged
               kind rather than the saved one means switching to Udgift reveals
               this straight away, without a save-and-reopen. */}
           {!c.isSystem && draft.kind === 'expense' && (
-            <>
-              <label className="flex items-center gap-2 text-xs text-ink-500">
-                Betales
-                <select
-                  className="rounded-lg border border-ink-200 bg-white px-2 py-1 text-xs dark:border-ink-700 dark:bg-ink-800"
-                  aria-label="Betales"
-                  value={draft.periodMonths ?? 1}
-                  onChange={(e) => {
-                    const v = Number(e.target.value)
-                    setDraft((d) => ({ ...d, periodMonths: v === 1 ? null : v }))
-                  }}
-                >
-                  {PERIOD_OPTIONS.map((o) => (
-                    <option key={o.months} value={o.months}>
-                      {o.label}
-                    </option>
-                  ))}
-                </select>
+            <div className="rounded-xl bg-ink-100 p-2.5 dark:bg-ink-800/60">
+              <label className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-brand-600"
+                  checked={draft.rollover}
+                  onChange={(e) => setDraft((d) => ({ ...d, rollover: e.target.checked }))}
+                />
+                Gem det ubrugte til næste måned
               </label>
-              {draft.periodMonths !== null && draft.periodMonths > 1 && (
-                <p className="text-xs text-ink-500">
-                  Budgettet er hele regningen — der sættes 1/{draft.periodMonths} til side hver måned.
-                </p>
+              <p className="mt-1 text-xs text-ink-500">
+                Ubrugte penge bliver stående i kategorien. Bruger du mere end der står, mangler beløbet næste
+                måned.
+              </p>
+
+              {/* Only a hint: it says when to expect the next bill, so the app
+                  can warn that the pot will fall short. It does not change what
+                  the budget amount means. */}
+              {draft.rollover && (
+                <label className="mt-2 flex items-center gap-2 text-xs text-ink-500">
+                  Regning kommer
+                  <select
+                    className="rounded-lg border border-ink-200 bg-white px-2 py-1 text-xs dark:border-ink-700 dark:bg-ink-800"
+                    aria-label="Regning kommer"
+                    value={draft.periodMonths ?? 0}
+                    onChange={(e) => {
+                      const v = Number(e.target.value)
+                      setDraft((d) => ({ ...d, periodMonths: v === 0 ? null : v }))
+                    }}
+                  >
+                    <option value={0}>Ikke fast</option>
+                    {PERIOD_OPTIONS.map((o) => (
+                      <option key={o.months} value={o.months}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               )}
-            </>
+            </div>
           )}
 
           <div className="flex gap-2">

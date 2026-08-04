@@ -45,6 +45,8 @@ export function category(overrides: Partial<Category> = {}): Category {
     isSystem: false,
     archived: false,
     periodMonths: null,
+    rollover: false,
+    rolloverSince: null,
     sortOrder: 10,
     updatedAt: 1,
     deletedAt: null,

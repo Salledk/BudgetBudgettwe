@@ -1,7 +1,8 @@
 import { db, isLive } from './db'
 import { newId } from '@/lib/id'
-import { monthOf, type IsoMonth } from '@/lib/dates'
+import { currentMonth, monthOf, type IsoMonth } from '@/lib/dates'
 import { buildSeedAccounts, buildSeedCategories, buildSeedRules } from './seed'
+import { migrateBudgetModel } from './migrate'
 import { DEFAULT_BUDGET_MONTH, DEFAULT_SETTINGS, type Account, type BankProfile, type Budget, type Category, type ImportBatch, type ResolvedBudget, type Rule, type Settings, type Transaction } from './types'
 
 /**
@@ -10,7 +11,7 @@ import { DEFAULT_BUDGET_MONTH, DEFAULT_SETTINGS, type Account, type BankProfile,
  * to this file rather than to every screen.
  */
 
-const SETTINGS_ID = 'singleton'
+export const SETTINGS_ID = 'singleton'
 
 function now(): number {
   return Date.now()
@@ -31,6 +32,9 @@ export async function ensureSeeded(): Promise<void> {
   const existing = await db.categories.count()
   if (existing > 0) {
     await ensureSettings()
+    // Existing data may predate rollover, where a periodic category's budget
+    // held a whole period's cost.
+    await migrateBudgetModel()
     return
   }
 
@@ -136,6 +140,7 @@ export async function createCategory(data: {
   icon?: string
   color?: string
   periodMonths?: number | null
+  rollover?: boolean
 }): Promise<Category> {
   const categories = await listCategories()
   // Appended to its own kind, not to the very end. The system categories sort
@@ -152,6 +157,8 @@ export async function createCategory(data: {
     isSystem: false,
     archived: false,
     periodMonths: data.periodMonths ?? null,
+    rollover: data.rollover ?? false,
+    rolloverSince: data.rollover ? currentMonth() : null,
     sortOrder: (after?.sortOrder ?? 0) + 10,
   }) as Category
   await db.categories.put(category)
@@ -416,6 +423,28 @@ export async function budgetMap(month: IsoMonth): Promise<Map<string, ResolvedBu
   for (const b of defaults) out.set(b.categoryId, { ...b, month, inherited: true })
   for (const b of monthRows) out.set(b.categoryId, { ...b, inherited: false })
   return out
+}
+
+/**
+ * A resolver for the budget in force in any month, for building rollover pots.
+ *
+ * Pots need every month from where they started, not just the one on screen,
+ * and resolving each month through `budgetMap` would refetch the standing
+ * budget once per month. Both tables are read once here and the precedence —
+ * a month row wins over the default, **including a row set to zero** — is
+ * applied per lookup.
+ */
+export async function budgetHistory(): Promise<(month: IsoMonth, categoryId: string) => number> {
+  const rows = (await db.budgets.toArray()).filter(isLive)
+
+  const defaults = new Map<string, number>()
+  const byMonth = new Map<string, number>()
+  for (const b of rows) {
+    if (b.month === DEFAULT_BUDGET_MONTH) defaults.set(b.categoryId, b.amountMinor)
+    else byMonth.set(`${b.month}|${b.categoryId}`, b.amountMinor)
+  }
+
+  return (month, categoryId) => byMonth.get(`${month}|${categoryId}`) ?? defaults.get(categoryId) ?? 0
 }
 
 export async function setDefaultBudget(

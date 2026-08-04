@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { db } from '@/data/db'
@@ -8,6 +8,7 @@ import { AppDataProvider } from '@/app/useAppData'
 import { newId } from '@/lib/id'
 import { currentMonth } from '@/lib/dates'
 import type { Category, Transaction } from '@/data/types'
+import { INFERABLE_PERIODS } from '@/features/budget/periodic'
 import { SettingsScreen, reorderWithinGroup } from './SettingsScreen'
 
 /** Editing categories and rules, which previously could only be created or deleted. */
@@ -75,6 +76,16 @@ async function waitForRecategorisation() {
 
 beforeEach(seed)
 
+/**
+ * The provider reloads after every write, and a test can finish while one of
+ * those reads is still open. Unmounting and letting the queue drain here means
+ * the next test's `db.delete()` does not pull the connection out from under it.
+ */
+afterEach(async () => {
+  cleanup()
+  await new Promise((resolve) => setTimeout(resolve, 0))
+})
+
 describe('editing a category', () => {
   it('renames it', async () => {
     renderScreen()
@@ -135,24 +146,24 @@ describe('editing a category', () => {
   })
 })
 
-describe('the periodic interval', () => {
-  it('is saved from the editor and shown on the row', async () => {
+describe('saving up in a category', () => {
+  it('turns rollover on and shows it on the row', async () => {
     renderScreen()
     await openPanel(/^Kategorier/)
 
     await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
-    await userEvent.selectOptions(screen.getByLabelText('Betales'), '12')
+    await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
     await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
 
     await waitFor(async () => {
       const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
-      expect(c.periodMonths).toBe(12)
+      expect(c.rollover).toBe(true)
+      // Accrual has to start somewhere, or the pot cannot be computed at all.
+      expect(c.rolloverSince).toMatch(/^\d{4}-\d{2}$/)
     })
 
-    // The badge is the only thing that distinguishes a yearly bill from a
-    // monthly one at a glance.
     const row = (await screen.findByRole('button', { name: 'Forsikring' })).closest('li') as HTMLElement
-    expect(within(row).getByText('ÅRLIG')).toBeInTheDocument()
+    expect(within(row).getByText(/OPSPARING/)).toBeInTheDocument()
   })
 
   it('is discarded when the edit is cancelled', async () => {
@@ -160,36 +171,73 @@ describe('the periodic interval', () => {
     await openPanel(/^Kategorier/)
 
     await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
-    await userEvent.selectOptions(screen.getByLabelText('Betales'), '3')
+    await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
     await userEvent.click(screen.getByRole('button', { name: 'Fortryd' }))
 
     const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
-    expect(c.periodMonths).toBeNull()
+    expect(c.rollover).toBe(false)
+  })
+
+  it('only offers the billing interval once rollover is on', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    // The interval only exists to warn that a pot will fall short, so it has
+    // nothing to say about a category that does not save.
+    expect(screen.queryByLabelText('Regning kommer')).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
+    expect(screen.getByLabelText('Regning kommer')).toBeInTheDocument()
+  })
+
+  it('offers every interval that inference can produce', async () => {
+    // Inference could return 2 or 4 while the picker offered only 1, 3, 6 and
+    // 12, leaving those categories showing an interval nobody could select.
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
+
+    const select = screen.getByLabelText('Regning kommer')
+    const offered = within(select).getAllByRole('option').map((o) => (o as HTMLOptionElement).value)
+    for (const months of INFERABLE_PERIODS) {
+      expect(offered).toContain(String(months))
+    }
+  })
+
+  it('saves the chosen interval alongside rollover', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
+    await userEvent.selectOptions(screen.getByLabelText('Regning kommer'), '2')
+    await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
+
+    await waitFor(async () => {
+      const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+      expect(c.periodMonths).toBe(2)
+    })
   })
 
   it('is not offered for an income category', async () => {
     renderScreen()
     await openPanel(/^Kategorier/)
 
-    // Income has no recurring bill to spread over the year.
+    // Income has nothing to save toward.
     await userEvent.click(await screen.findByRole('button', { name: 'Løn' }))
-    expect(screen.queryByLabelText('Betales')).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox', { name: /Gem det ubrugte/ })).not.toBeInTheDocument()
   })
 
-  it('appears as soon as the type is switched to expense', async () => {
-    renderScreen()
-    await openPanel(/^Kategorier/)
-
-    await userEvent.click(await screen.findByRole('button', { name: 'Løn' }))
-    await userEvent.selectOptions(screen.getByLabelText('Type'), 'expense')
-
-    // Reading the staged kind, so no save-and-reopen round trip is needed.
-    expect(screen.getByLabelText('Betales')).toBeInTheDocument()
-  })
-
-  it('is cleared when a periodic category stops being an expense', async () => {
+  it('clears rollover when a category stops being an expense', async () => {
     const insurance = (await repo.listCategories()).find((c) => c.name === 'Forsikring')!
-    await repo.updateCategory(insurance.id, { periodMonths: 12 })
+    await repo.updateCategory(insurance.id, {
+      rollover: true,
+      rolloverSince: '2026-01',
+      periodMonths: 12,
+    })
 
     renderScreen()
     await openPanel(/^Kategorier/)
@@ -198,10 +246,12 @@ describe('the periodic interval', () => {
     await userEvent.selectOptions(screen.getByLabelText('Type'), 'income')
     await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
 
-    // Left set, the interval would keep affecting nothing while still reading
-    // as configured.
+    // Left set, the pot would keep accruing against a category that no longer
+    // spends anything.
     await waitFor(async () => {
       const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+      expect(c.rollover).toBe(false)
+      expect(c.rolloverSince).toBeNull()
       expect(c.periodMonths).toBeNull()
     })
   })

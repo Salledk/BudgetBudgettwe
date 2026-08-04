@@ -39,12 +39,31 @@ export interface Category extends BaseRecord {
   archived: boolean
   sortOrder: number
   /**
-   * Billing interval in months for a periodic expense — 3 for quarterly, 12 for
-   * yearly. `null` for an ordinary category.
+   * Unspent budget stays in the category instead of expiring at month end, and
+   * overspending carries the shortfall into the next month.
    *
-   * When set, the category's budget holds the **full cost per period** and the
-   * monthly set-aside is derived, so changing the interval can never leave a
-   * stale monthly figure behind. Records written before this field existed read
+   * This replaced a separate "periodic" mode, and subsumes it: budgeting a
+   * twelfth of an annual premium every month with rollover on leaves the full
+   * premium available in the month the bill lands. It also covers saving toward
+   * something with no billing interval at all, which the old mode could not
+   * express.
+   */
+  rollover: boolean
+  /**
+   * First month the pot accrues from — the month rollover was switched on.
+   *
+   * Without an explicit start the balance would be derived from budgets that
+   * were never in force, opening the pot at a confident wrong number. `null`
+   * whenever `rollover` is false.
+   */
+  rolloverSince: IsoMonth | null
+  /**
+   * Expected billing interval in months — 3 for quarterly, 12 for yearly.
+   * `null` when the category has no fixed rhythm.
+   *
+   * Only a hint. It drives the warning that a bill is due and the pot will not
+   * cover it; it does **not** change what the budget field means, which it did
+   * before rollover existed. Records written before this field existed read
    * back as `undefined` and must be treated as `null`.
    */
   periodMonths: number | null
@@ -183,6 +202,13 @@ export interface Settings extends BaseRecord {
   /** Fraction of budget at which a category is flagged "at risk". */
   atRiskRatio: number
   onboardedAt: number | null
+  /**
+   * Which budget model the stored data follows. 1 predates rollover, where a
+   * periodic category's budget held a whole period's cost; 2 is the current
+   * model, where every budget is a monthly amount. Guards the one-time
+   * conversion in `migrate.ts`.
+   */
+  budgetModelVersion: number
 }
 
 /** Convenience shape used across the UI — a transaction plus its resolved refs. */
@@ -196,10 +222,17 @@ export const SYSTEM_CATEGORY = {
   savings: 'sys-savings',
 } as const
 
+/**
+ * Current budget model. 1 predates rollover, where a periodic category's budget
+ * held a whole period's cost; 2 makes every budget a monthly amount.
+ */
+export const BUDGET_MODEL_VERSION = 2
+
 export const DEFAULT_SETTINGS: Omit<Settings, keyof BaseRecord> = {
   currency: 'DKK',
   locale: 'da-DK',
   lookbackMonths: 6,
   atRiskRatio: 1.0,
   onboardedAt: null,
+  budgetModelVersion: BUDGET_MODEL_VERSION,
 }

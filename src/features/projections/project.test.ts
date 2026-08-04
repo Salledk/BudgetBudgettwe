@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { category, monthlySeries, tx } from '@/test/factories'
 import type { ResolvedBudget } from '@/data/types'
+import { potAt } from '@/features/budget/pot'
 import { detectRecurringCategories, projectMonth, runway } from './project'
 
 const HISTORY = ['2025-10', '2025-11', '2025-12', '2026-01', '2026-02']
@@ -310,83 +311,112 @@ describe('projectMonth — month totals', () => {
   })
 })
 
-describe('projectMonth — periodic categories', () => {
-  const insurance = category({ id: 'ins', name: 'Forsikring', periodMonths: 12 })
-  // 6.400 kr a year, paid in January.
-  const budgets = new Map([['ins', budget('ins', 640000)]])
+describe('projectMonth — categories that roll over', () => {
+  // 6.400 kr a year, budgeted as a twelfth each month and paid in January.
+  const setAside = Math.round(640000 / 12)
+  const insurance = category({
+    id: 'ins',
+    name: 'Forsikring',
+    periodMonths: 12,
+    rollover: true,
+    rolloverSince: '2026-01',
+  })
+  const budgets = new Map([['ins', budget('ins', setAside)]])
   const paid = monthlySeries('ins', [['2026-01', 640000]])
 
-  it('judges against the monthly set-aside, not the whole bill', () => {
+  const potFor = (month: string, transactions = paid) =>
+    new Map([
+      [
+        'ins',
+        potAt({
+          month,
+          categoryId: 'ins',
+          since: '2026-01',
+          periodMonths: 12,
+          budgetFor: () => setAside,
+          transactions,
+        }),
+      ],
+    ])
+
+  it('reports what is in the pot rather than budget minus spend', () => {
     const result = projectMonth({
-      month: MONTH, transactions: paid, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+      month: MONTH, transactions: [], categories: [insurance], budgets,
+      pots: potFor(MONTH, []), historyMonths: HISTORY, now: MID_MONTH,
     })
 
     const p = result.categories.find((c) => c.categoryId === 'ins')!
-    expect(p.periodic).not.toBeNull()
-    expect(p.budgetMinor).toBe(53333)
-    expect(p.periodic!.perPeriodMinor).toBe(640000)
+    expect(p.pot).not.toBeNull()
+    expect(p.budgetMinor).toBe(setAside)
+    expect(p.remainingMinor).toBe(p.pot!.availableMinor)
   })
 
-  it('does not flag the month the bill lands', () => {
-    // The whole point: an annual premium is not a catastrophe in January.
+  it('does not flag the month the bill lands once the pot has filled', () => {
+    // The whole point: an annual premium is not a catastrophe in December when
+    // eleven months of budget have been accumulating for it.
     const result = projectMonth({
-      month: '2026-01',
-      transactions: paid,
+      month: '2026-12',
+      transactions: monthlySeries('ins', [['2026-12', 639996]]),
       categories: [insurance],
       budgets,
+      pots: potFor('2026-12', monthlySeries('ins', [['2026-12', 639996]])),
       historyMonths: HISTORY,
-      now: new Date(2026, 0, 20),
+      now: new Date(2026, 11, 20),
     })
 
     const p = result.categories.find((c) => c.categoryId === 'ins')!
-    expect(p.actualMinor).toBe(640000)
+    expect(p.actualMinor).toBe(639996)
     expect(p.status).not.toBe('over')
     expect(result.alerts).toHaveLength(0)
   })
 
-  it('stays quiet for the rest of the year', () => {
+  it('stays quiet while the pot is filling', () => {
     for (const month of ['2026-03', '2026-06', '2026-09']) {
       const result = projectMonth({
-        month, transactions: paid, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+        month, transactions: [], categories: [insurance], budgets,
+        pots: potFor(month, []), historyMonths: HISTORY, now: MID_MONTH,
       })
       expect(result.categories.find((c) => c.categoryId === 'ins')!.status).toBe('on-track')
     }
   })
 
-  it('flags a bill that outgrew its budget', () => {
-    const bigger = monthlySeries('ins', [['2026-01', 720000]])
-
+  it('flags a pot that has been spent into the red', () => {
+    // Paid in January, long before a twelfth a month could cover it.
     const result = projectMonth({
-      month: MONTH, transactions: bigger, categories: [insurance], budgets, historyMonths: HISTORY, now: MID_MONTH,
+      month: '2026-01', transactions: paid, categories: [insurance], budgets,
+      pots: potFor('2026-01'), historyMonths: HISTORY, now: new Date(2026, 0, 20),
     })
 
     const p = result.categories.find((c) => c.categoryId === 'ins')!
     expect(p.status).toBe('over')
-    expect(p.message).toContain('mere end budgetteret')
+    expect(p.message).toContain('mangler næste måned')
   })
 
-  it('warns when the next bill is close and the reserve is short', () => {
+  it('warns when the next bill is close and the pot is short', () => {
+    const thin = new Map([
+      ['ins', potAt({
+        month: '2026-11', categoryId: 'ins', since: '2026-10', periodMonths: 12,
+        budgetFor: () => 10000, transactions: monthlySeries('ins', [['2025-12', 640000]]),
+      })],
+    ])
+
     const result = projectMonth({
-      month: '2026-12',
-      transactions: paid,
-      categories: [insurance],
-      budgets,
-      historyMonths: HISTORY,
-      now: new Date(2026, 11, 15),
+      month: '2026-11', transactions: [], categories: [insurance], budgets,
+      pots: thin, historyMonths: HISTORY, now: new Date(2026, 10, 15),
     })
 
     const p = result.categories.find((c) => c.categoryId === 'ins')!
     expect(p.status).toBe('at-risk')
-    expect(p.message).toContain('til side')
+    expect(p.message).toContain('regning forventes snart')
   })
 
-  it('leaves an unmarked category on the ordinary path', () => {
-    const ordinary = category({ id: 'ins', name: 'Forsikring', periodMonths: null })
+  it('leaves a category without a pot on the ordinary path', () => {
+    const ordinary = category({ id: 'ins', name: 'Forsikring' })
     const result = projectMonth({
       month: MONTH, transactions: paid, categories: [ordinary], budgets, historyMonths: HISTORY, now: MID_MONTH,
     })
 
-    expect(result.categories.find((c) => c.categoryId === 'ins')!.periodic).toBeNull()
+    expect(result.categories.find((c) => c.categoryId === 'ins')!.pot).toBeNull()
   })
 })
 

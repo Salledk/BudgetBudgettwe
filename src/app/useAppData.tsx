@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState, t
 import { currentMonth, lastCompleteMonths, monthOf, type IsoMonth } from '@/lib/dates'
 import * as repo from '@/data/repo'
 import type { Account, Category, ResolvedBudget, Settings, Transaction } from '@/data/types'
+import { potAt, type PotState } from '@/features/budget/pot'
 
 /**
  * Loads everything once and keeps it in memory.
@@ -17,6 +18,8 @@ interface AppData {
   categories: Category[]
   transactions: Transaction[]
   budgets: Map<string, ResolvedBudget>
+  /** Pot balances for categories that roll over, keyed by category id. */
+  pots: Map<string, PotState>
   settings: Settings | null
   month: IsoMonth
   setMonth: (m: IsoMonth) => void
@@ -35,22 +38,46 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
   const [categories, setCategories] = useState<Category[]>([])
   const [transactions, setTransactions] = useState<Transaction[]>([])
   const [budgets, setBudgets] = useState<Map<string, ResolvedBudget>>(new Map())
+  const [pots, setPots] = useState<Map<string, PotState>>(new Map())
   const [settings, setSettings] = useState<Settings | null>(null)
   const [month, setMonth] = useState<IsoMonth>(() => currentMonth())
 
   const load = useCallback(async (targetMonth: IsoMonth) => {
     await repo.ensureSeeded()
-    const [a, c, t, b, s] = await Promise.all([
+    const [a, c, t, b, s, budgetFor] = await Promise.all([
       repo.listAccounts(),
       repo.listCategories(),
       repo.listTransactions(),
       repo.budgetMap(targetMonth),
       repo.getSettings(),
+      repo.budgetHistory(),
     ])
+
+    // A pot spans every month since it was opened, so it cannot be derived from
+    // the single month `budgetMap` resolves. Built here, beside the data it
+    // needs, rather than inside `projectMonth`, which stays a pure function of
+    // one month.
+    const nextPots = new Map<string, PotState>()
+    for (const category of c) {
+      if (!category.rollover || !category.rolloverSince) continue
+      nextPots.set(
+        category.id,
+        potAt({
+          month: targetMonth,
+          categoryId: category.id,
+          since: category.rolloverSince,
+          periodMonths: category.periodMonths ?? null,
+          budgetFor: (m) => budgetFor(m, category.id),
+          transactions: t,
+        }),
+      )
+    }
+
     setAccounts(a)
     setCategories(c)
     setTransactions(t)
     setBudgets(b)
+    setPots(nextPots)
     setSettings(s)
     setLoading(false)
   }, [])
@@ -95,6 +122,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       categories,
       transactions,
       budgets,
+      pots,
       settings,
       month,
       setMonth,
@@ -103,7 +131,7 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       categoriesById,
       accountsById,
     }),
-    [loading, accounts, categories, transactions, budgets, settings, month, historyMonths, refresh, categoriesById, accountsById],
+    [loading, accounts, categories, transactions, budgets, pots, settings, month, historyMonths, refresh, categoriesById, accountsById],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

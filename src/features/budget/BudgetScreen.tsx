@@ -8,13 +8,12 @@ import * as repo from '@/data/repo'
 import { DEFAULT_BUDGET_MONTH } from '@/data/types'
 import { projectMonth, type CategoryProjection } from '@/features/projections/project'
 import { MIN_MONTHS, suggestBudget, type CategorySuggestion } from './suggest'
-import { PERIOD_OPTIONS, monthlySetAside } from './periodic'
 
 /** Which budget is being edited: the standing default, or one month. */
 type Scope = 'default' | 'month'
 
 export function BudgetScreen() {
-  const { loading, transactions, categories, categoriesById, budgets, month, setMonth, historyMonths, refresh } = useAppData()
+  const { loading, transactions, categories, categoriesById, budgets, pots, month, setMonth, historyMonths, refresh } = useAppData()
   const [showSuggest, setShowSuggest] = useState(false)
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -29,7 +28,7 @@ export function BudgetScreen() {
   }, [budgets])
 
   const projection = useMemo(
-    () => projectMonth({ month, transactions, categories, budgets, historyMonths }),
+    () => projectMonth({ month, transactions, categories, budgets, pots, historyMonths }),
     [month, transactions, categories, budgets, historyMonths],
   )
 
@@ -67,8 +66,13 @@ export function BudgetScreen() {
     await refresh()
   }
 
-  async function setPeriod(categoryId: string, periodMonths: number | null) {
-    await repo.updateCategory(categoryId, { periodMonths })
+  async function setRollover(categoryId: string, rollover: boolean) {
+    // Accrual starts now rather than being backdated over budgets that were
+    // never in force, which would open the pot at a confident wrong number.
+    await repo.updateCategory(categoryId, {
+      rollover,
+      rolloverSince: rollover ? month : null,
+    })
     await refresh()
   }
 
@@ -182,7 +186,6 @@ export function BudgetScreen() {
               const resolved = budgets.get(c.categoryId)
               const inherited = resolved?.inherited ?? false
               const shownMinor = scope === 'default' ? (defaults.get(c.categoryId) ?? null) : c.budgetMinor
-              const periodMonths = category?.periodMonths ?? null
 
               return (
                 <li key={c.categoryId} className="card">
@@ -193,10 +196,8 @@ export function BudgetScreen() {
                     >
                       <span aria-hidden>{c.icon}</span>
                       <span className="truncate">{c.categoryName}</span>
-                      {c.periodic ? (
-                        <span className="shrink-0 text-[10px] text-ink-400">
-                          {periodMonths === 12 ? 'ÅRLIG' : periodMonths === 3 ? 'KVARTAL' : 'PERIODISK'}
-                        </span>
+                      {c.pot ? (
+                        <span className="shrink-0 text-[10px] text-ink-400">OPSPARING</span>
                       ) : (
                         c.isRecurring && <span className="shrink-0 text-[10px] text-ink-400">FAST</span>
                       )}
@@ -267,18 +268,16 @@ export function BudgetScreen() {
                         </button>
                       </div>
                       {invalid && <p className="text-xs text-red-600">Skriv et beløb, fx 3500.</p>}
-                      {periodMonths && periodMonths > 1 && (
+                      {category?.rollover && (
                         <p className="text-xs text-ink-500">
-                          Beløbet er hele regningen. Der lægges{' '}
-                          {formatMoneyRounded(monthlySetAside(parseUserAmount(draft) ?? shownMinor ?? 0, periodMonths))} til
-                          side hver måned.
+                          Beløbet lægges til kategorien hver måned. Det der ikke bliver brugt, bliver stående.
                         </p>
                       )}
                     </div>
                   )}
 
-                  {c.periodic ? (
-                    <PeriodicRow projection={c} />
+                  {c.pot ? (
+                    <PotRow projection={c} />
                   ) : (
                     <>
                       <ProgressBar
@@ -309,26 +308,19 @@ export function BudgetScreen() {
                     </p>
                   )}
 
-                  {/* Kept out of the amount editor: changing how often a bill
-                      arrives is a different decision from typing its size, and
-                      a dropdown appearing mid-edit made entering a number feel
-                      like filling in a form. */}
+                  {/* Kept out of the amount editor: deciding that a category
+                      saves up is a different decision from typing what it gets
+                      each month, and a control appearing mid-edit made entering
+                      a number feel like filling in a form. */}
                   {category && !category.isSystem && category.kind === 'expense' && (
                     <label className="mt-2 flex items-center gap-1.5 text-xs text-ink-400">
-                      Betales
-                      <select
-                        className="bg-transparent text-xs text-ink-500 underline"
-                        value={periodMonths ?? 1}
-                        onChange={(e) =>
-                          void setPeriod(c.categoryId, Number(e.target.value) === 1 ? null : Number(e.target.value))
-                        }
-                      >
-                        {PERIOD_OPTIONS.map((o) => (
-                          <option key={o.months} value={o.months}>
-                            {o.label.toLowerCase()}
-                          </option>
-                        ))}
-                      </select>
+                      <input
+                        type="checkbox"
+                        className="h-3.5 w-3.5 accent-brand-600"
+                        checked={category.rollover}
+                        onChange={(e) => void setRollover(c.categoryId, e.target.checked)}
+                      />
+                      Gem det ubrugte til næste måned
                     </label>
                   )}
                 </li>
@@ -352,30 +344,34 @@ export function BudgetScreen() {
 }
 
 /**
- * A periodic category shows its reserve rather than a month-versus-budget bar:
- * the question is not "did I overspend in January" but "have I put enough aside
- * to cover the bill when it arrives".
+ * A category that rolls over shows what is in the pot, not this month against
+ * this month's budget. The question is "how much is there to spend", and the
+ * answer includes everything carried in from previous months.
  */
-function PeriodicRow({ projection }: { projection: CategoryProjection }) {
-  const r = projection.periodic!
-  const ratio = r.perPeriodMinor > 0 ? r.balanceMinor / r.perPeriodMinor : 0
-  const short = r.balanceMinor < 0
+function PotRow({ projection }: { projection: CategoryProjection }) {
+  const p = projection.pot!
+  const owed = p.availableMinor < 0
+  // Measured against everything that was available this month, so the bar reads
+  // as "how much of the pot is gone" rather than "how much of this month's
+  // budget is gone".
+  const poolMinor = p.carriedInMinor + p.budgetedMinor
+  const ratio = poolMinor > 0 ? p.spentMinor / poolMinor : 0
 
   return (
     <>
-      <ProgressBar ratio={ratio} color={projection.color} over={short} />
+      <ProgressBar ratio={ratio} color={projection.color} over={owed} />
       <div className="mt-1.5 flex justify-between text-xs text-ink-500">
-        <span className="tnum">
-          {short ? 'mangler ' : 'sat til side '}
-          {formatMoneyRounded(Math.abs(r.balanceMinor))} af {formatMoneyRounded(r.perPeriodMinor)}
+        <span className="tnum">{formatMoneyRounded(p.spentMinor)} brugt</span>
+        <span className={`tnum ${owed ? 'text-red-600 dark:text-red-400' : ''}`}>
+          {owed
+            ? `${formatMoneyRounded(-p.availableMinor)} i minus`
+            : `${formatMoneyRounded(p.availableMinor)} i kassen`}
         </span>
-        <span className="tnum">{formatMoneyRounded(r.setAsideMinor)}/md</span>
       </div>
-      {r.nextDueMonth && (
-        <p className="mt-1 text-xs text-ink-500">
-          {r.settledThisPeriod ? 'Betalt. N' : 'N'}æste regning ca. {formatMonthLabel(r.nextDueMonth)}
-        </p>
-      )}
+      <p className="mt-1 text-xs text-ink-400">
+        {formatMoneyRounded(p.carriedInMinor)} overført + {formatMoneyRounded(p.budgetedMinor)} denne måned
+        {p.nextDueMonth && ` · næste regning ca. ${formatMonthLabel(p.nextDueMonth)}`}
+      </p>
     </>
   )
 }
@@ -427,7 +423,11 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
     for (const s of suggestion.categories) {
       if (excluded.has(s.categoryId) || !s.suggestedPeriodMonths) continue
       if (periodicOptOut.has(s.categoryId)) continue
-      await repo.updateCategory(s.categoryId, { periodMonths: s.suggestedPeriodMonths })
+      await repo.updateCategory(s.categoryId, {
+        periodMonths: s.suggestedPeriodMonths,
+        rollover: true,
+        rolloverSince: month,
+      })
     }
 
     setBusy(false)
@@ -544,7 +544,7 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
                             })
                           }
                         >
-                          Behandl alligevel som periodisk
+                          Gem alligevel det ubrugte
                         </button>
                       ) : (
                         <>
@@ -552,7 +552,7 @@ function SuggestSheet({ onClose, onSaved }: { onClose: () => void; onSaved: () =
                           {s.suggestedPeriodMonths === 12
                             ? 'en gang om året'
                             : `hver ${s.suggestedPeriodMonths}. måned`}
-                          . Beløbet lægges til side løbende.{' '}
+                          . Det ubrugte bliver stående, så der er nok når regningen kommer.{' '}
                           <button
                             type="button"
                             className="underline"

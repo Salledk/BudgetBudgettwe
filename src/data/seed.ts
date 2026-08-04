@@ -2,8 +2,12 @@ import { newId } from '@/lib/id'
 import type { Account, Category, Rule } from './types'
 import { SYSTEM_CATEGORY } from './types'
 
-// periodMonths is applied uniformly below rather than repeated on every entry.
-type NewCategory = Omit<Category, 'id' | 'updatedAt' | 'deletedAt' | 'periodMonths'> & { id?: string }
+// The rollover fields are applied uniformly below rather than repeated on
+// every entry.
+type NewCategory = Omit<
+  Category,
+  'id' | 'updatedAt' | 'deletedAt' | 'periodMonths' | 'rollover' | 'rolloverSince'
+> & { id?: string }
 
 /**
  * Default Danish category set. Split into fixed and variable groups because
@@ -54,8 +58,11 @@ export function buildSeedCategories(now = Date.now()): Category[] {
   return CATEGORY_SEED.map((c) => ({
     ...c,
     id: c.id ?? newId(now),
-    // Nothing is periodic until the user says so, or accepts a suggestion.
+    // Nothing rolls over or has a billing rhythm until the user says so, or
+    // accepts a suggestion.
     periodMonths: null,
+    rollover: false,
+    rolloverSince: null,
     updatedAt: now,
     deletedAt: null,
   }))

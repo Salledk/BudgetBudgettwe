@@ -3,7 +3,7 @@ import { median } from '@/lib/stats'
 import type { Category, ResolvedBudget, Transaction } from '@/data/types'
 import { isTransfer } from '@/features/import/transfers'
 import { monthlyTotals } from '@/features/budget/suggest'
-import { isPeriodic, reserveAt, type ReserveState } from '@/features/budget/periodic'
+import type { PotState } from '@/features/budget/pot'
 
 /**
  * Where the current month will land, per category and overall.
@@ -31,11 +31,11 @@ export interface CategoryProjection {
   recurringSettled: boolean
   isRecurring: boolean
   /**
-   * Sinking-fund state for a periodic category. When set, `budgetMinor` is the
-   * monthly set-aside and `remainingMinor` is the reserve balance rather than
-   * budget-minus-spend.
+   * Pot state for a category that rolls over. When set, `remainingMinor` is
+   * what is actually available — the balance carried in plus this month's
+   * budget, less what has been spent — rather than budget-minus-spend.
    */
-  periodic: ReserveState | null
+  pot: PotState | null
   /** Plain-language line shown in the alerts list. */
   message: string | null
 }
@@ -79,11 +79,18 @@ export function projectMonth(params: {
   transactions: Transaction[]
   categories: Category[]
   budgets: Map<string, ResolvedBudget>
+  /**
+   * Pot state per category that rolls over. Computed outside — a pot spans
+   * every month since it was opened, and this function deliberately sees only
+   * one month's budgets.
+   */
+  pots?: Map<string, PotState>
   /** Months of history used to decide recurring vs variable. */
   historyMonths: IsoMonth[]
   now?: Date
 }): MonthProjection {
   const { month, transactions, categories, budgets, historyMonths } = params
+  const pots = params.pots ?? new Map<string, PotState>()
   const now = params.now ?? new Date()
 
   const isCurrentMonth = month === currentMonth(now)
@@ -146,36 +153,27 @@ export function projectMonth(params: {
     const rawBudgetMinor = budget ? budget.amountMinor : null
 
     /*
-     * A periodic category is judged against what it should be putting aside
-     * each month, not against the whole periodic bill. Comparing a month's
-     * spending to a full annual premium would call eleven months a triumph and
-     * the twelfth a catastrophe, which is exactly the distortion this exists to
-     * remove.
+     * A category that rolls over is judged against what is actually in the pot,
+     * not against this month's budget alone. Spending 6.400 kr in the month an
+     * annual premium lands is not overspending if eleven months of budget have
+     * been accumulating for it.
      */
-    if (isPeriodic(category) && rawBudgetMinor !== null) {
-      const periodMonths = category.periodMonths as number
-      const reserve = reserveAt({
-        month,
-        categoryId,
-        perPeriodMinor: rawBudgetMinor,
-        periodMonths,
-        transactions,
-      })
-
+    const pot = pots.get(categoryId)
+    if (pot) {
       /*
        * Two distinct problems, and neither is "spent a lot this month":
-       *  - the budget is smaller than the bill actually turned out to be
-       *  - the bill is nearly due and not enough has been set aside
-       * Anything else is a fund quietly doing its job.
+       *  - the pot is empty and now owes money, which carries into next month
+       *  - a bill is expected shortly and the pot will not cover it
+       * Anything else is a pot quietly doing its job.
        */
       const status: ProjectionStatus =
-        reserve.shortfallMinor > 0 ? 'over' : reserve.behind ? 'at-risk' : 'on-track'
+        pot.availableMinor < 0 ? 'over' : pot.behind ? 'at-risk' : 'on-track'
 
       const message =
-        reserve.shortfallMinor > 0
-          ? `${category.name}: regningen var ${krLabel(reserve.lastPaymentMinor)} — ${krLabel(reserve.shortfallMinor)} mere end budgetteret.`
-          : reserve.behind
-            ? `${category.name}: regning forventes snart, men der er kun sat ${krLabel(reserve.balanceMinor)} af ${krLabel(reserve.perPeriodMinor)} til side.`
+        pot.availableMinor < 0
+          ? `${category.name}: ${krLabel(-pot.availableMinor)} mere brugt end der stod — beløbet mangler næste måned.`
+          : pot.behind
+            ? `${category.name}: regning forventes snart, men der står kun ${krLabel(pot.availableMinor)} i kategorien.`
             : null
 
       projections.push({
@@ -183,14 +181,16 @@ export function projectMonth(params: {
         categoryName: category.name,
         icon: category.icon,
         color: category.color,
-        budgetMinor: reserve.setAsideMinor,
+        budgetMinor: pot.budgetedMinor,
         actualMinor,
-        projectedMinor: reserve.setAsideMinor,
-        remainingMinor: reserve.balanceMinor,
+        projectedMinor: pot.budgetedMinor,
+        remainingMinor: pot.availableMinor,
         status,
-        recurringSettled: reserve.settledThisPeriod,
-        isRecurring: true,
-        periodic: reserve,
+        // A pot spans months, so "already settled this month" says nothing
+        // useful about it.
+        recurringSettled: false,
+        isRecurring: recurring.has(categoryId),
+        pot,
         message,
       })
       continue
@@ -225,7 +225,7 @@ export function projectMonth(params: {
       status,
       recurringSettled: isRecurring && actualMinor > 0,
       isRecurring,
-      periodic: null,
+      pot: null,
       message: messageFor(category.name, actualMinor, projectedMinor, budgetMinor, status),
     })
   }
