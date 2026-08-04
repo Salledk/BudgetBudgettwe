@@ -1,11 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core'
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  useSortable,
+  verticalListSortingStrategy,
+} from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
 import { formatAmountPlain, formatMoney, parseUserAmount } from '@/lib/money'
 import { Banner, Screen, Sheet, Spinner } from '@/app/components'
 import { useAccountBalances, useAppData } from '@/app/useAppData'
 import * as repo from '@/data/repo'
 import type { Account, Category, Rule } from '@/data/types'
 import { recategoriseAll } from '@/features/import/runImport'
-import { PERIOD_OPTIONS } from '@/features/budget/periodic'
+import { PERIOD_OPTIONS, isPeriodic } from '@/features/budget/periodic'
 
 type Panel = 'accounts' | 'categories' | 'rules' | 'data' | null
 
@@ -210,6 +227,61 @@ const CATEGORY_KINDS: Array<{ value: Category['kind']; label: string }> = [
   { value: 'savings', label: 'Opsparing' },
 ]
 
+/**
+ * Income and expense answer different questions, so each gets its own heading
+ * rather than sharing one undifferentiated list. Transfers and savings sit
+ * together at the end: neither is money you budget.
+ */
+const CATEGORY_GROUPS: Array<{ key: string; label: string; kinds: Array<Category['kind']> }> = [
+  { key: 'income', label: 'Indkomst', kinds: ['income'] },
+  { key: 'expense', label: 'Udgifter', kinds: ['expense'] },
+  { key: 'other', label: 'Andre', kinds: ['savings', 'transfer'] },
+]
+
+function groupKeyOf(kind: Category['kind']): string {
+  return CATEGORY_GROUPS.find((g) => g.kinds.includes(kind))?.key ?? 'other'
+}
+
+/** Same wording the budget screen uses, so one setting reads the same in both. */
+function periodicBadge(c: Category): string | null {
+  if (!isPeriodic(c)) return null
+  return c.periodMonths === 12 ? 'ÅRLIG' : c.periodMonths === 3 ? 'KVARTAL' : 'PERIODISK'
+}
+
+interface CategoryDraft {
+  name: string
+  icon: string
+  kind: Category['kind']
+  periodMonths: number | null
+}
+
+/**
+ * The new display order after dragging `activeId` onto `overId`, or null when
+ * the move is not allowed.
+ *
+ * Kept separate from the drag handler because this is the part with a rule in
+ * it — a drop across a heading would change what the category *is*, which is
+ * the editor's job, not the drag handle's — and because pointer and keyboard
+ * dragging both depend on layout measurement that jsdom cannot provide.
+ */
+export function reorderWithinGroup(
+  categories: Category[],
+  activeId: string,
+  overId: string,
+): string[] | null {
+  if (activeId === overId) return null
+
+  const byId = new Map(categories.map((c) => [c.id, c]))
+  const from = byId.get(activeId)
+  const to = byId.get(overId)
+  if (!from || !to) return null
+  if (from.isSystem || to.isSystem) return null
+  if (groupKeyOf(from.kind) !== groupKeyOf(to.kind)) return null
+
+  const ids = categories.map((c) => c.id)
+  return arrayMove(ids, ids.indexOf(activeId), ids.indexOf(overId))
+}
+
 function CategoriesPanel({ onClose }: { onClose: () => void }) {
   const { categories, refresh } = useAppData()
   const [name, setName] = useState('')
@@ -217,133 +289,110 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
   const [icon, setIcon] = useState('📦')
 
   const [editing, setEditing] = useState<string | null>(null)
-  const [draft, setDraft] = useState({ name: '', icon: '', kind: 'expense' as Category['kind'] })
+  const [draft, setDraft] = useState<CategoryDraft>({
+    name: '',
+    icon: '',
+    kind: 'expense',
+    periodMonths: null,
+  })
+
+  // Holds the new order between the drop and the reload, so a dragged row does
+  // not snap back to where it came from for a frame.
+  const [pendingOrder, setPendingOrder] = useState<string[] | null>(null)
+
+  const ordered = useMemo(() => {
+    if (!pendingOrder) return categories
+    const rank = new Map(pendingOrder.map((id, i) => [id, i]))
+    return [...categories].sort(
+      (a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER),
+    )
+  }, [categories, pendingOrder])
+
+  const sensors = useSensors(
+    // A short press before a drag begins, so tapping a row still opens the
+    // editor and a vertical swipe still scrolls the sheet.
+    useSensor(PointerSensor, { activationConstraint: { delay: 200, tolerance: 5 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
 
   function startEdit(c: Category) {
     setEditing(c.id)
-    setDraft({ name: c.name, icon: c.icon, kind: c.kind })
+    setDraft({ name: c.name, icon: c.icon, kind: c.kind, periodMonths: c.periodMonths ?? null })
   }
 
   async function saveEdit(c: Category) {
     const trimmed = draft.name.trim()
     if (!trimmed) return
+    const kindNow = c.isSystem ? c.kind : draft.kind
     await repo.updateCategory(c.id, {
       name: trimmed,
       icon: draft.icon.trim() || c.icon,
       // A system category's kind drives how transfers are excluded from every
       // total, so it stays fixed even while its label can be changed.
-      kind: c.isSystem ? c.kind : draft.kind,
+      kind: kindNow,
+      // Only an expense has a bill to spread, so moving a category out of
+      // Udgift clears the interval rather than leaving it set but inert.
+      periodMonths: kindNow === 'expense' ? draft.periodMonths : null,
     })
     setEditing(null)
     await refresh()
   }
 
+  async function handleDragEnd(event: DragEndEvent) {
+    const { active, over } = event
+    if (!over) return
+
+    const next = reorderWithinGroup(ordered, String(active.id), String(over.id))
+    if (!next) return
+
+    setPendingOrder(next)
+    await repo.reorderCategories(next)
+    await refresh()
+    setPendingOrder(null)
+  }
+
+  async function remove(c: Category) {
+    if (!confirm(`Slet "${c.name}"? Transaktioner i kategorien bliver ukategoriserede.`)) return
+    await repo.deleteCategory(c.id)
+    await refresh()
+  }
+
   return (
     <Sheet open onClose={onClose} title="Kategorier">
-      <ul className="mb-3 space-y-1.5">
-        {categories.map((c) => (
-          <li key={c.id} className="card py-2.5">
-            <div className="flex items-center justify-between gap-2">
-            <button
-              type="button"
-              className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              onClick={() => (editing === c.id ? setEditing(null) : startEdit(c))}
-            >
-              <span aria-hidden>{c.icon}</span>
-              <span className="truncate text-sm">{c.name}</span>
-              <span className="shrink-0 text-[10px] text-ink-400">
-                {c.isSystem ? 'SYSTEM' : CATEGORY_KINDS.find((k) => k.value === c.kind)?.label.toUpperCase()}
-              </span>
-            </button>
-            {!c.isSystem && (
-              <button
-                type="button"
-                className="shrink-0 text-xs text-red-600"
-                onClick={async () => {
-                  if (!confirm(`Slet "${c.name}"? Transaktioner i kategorien bliver ukategoriserede.`)) return
-                  await repo.deleteCategory(c.id)
-                  await refresh()
-                }}
-              >
-                Slet
-              </button>
-            )}
-            </div>
-
-            {editing === c.id && (
-              <div className="mt-2 space-y-2">
-                <div className="flex gap-2">
-                  <input
-                    className="field w-16 text-center"
-                    value={draft.icon}
-                    aria-label="Ikon"
-                    onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value.slice(0, 2) }))}
-                  />
-                  <input
-                    autoFocus
-                    className="field flex-1"
-                    value={draft.name}
-                    aria-label={`Navn på ${c.name}`}
-                    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                    onFocus={(e) => e.currentTarget.select()}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') void saveEdit(c)
-                      if (e.key === 'Escape') setEditing(null)
-                    }}
-                  />
-                </div>
-                {!c.isSystem && (
-                  <select
-                    className="field"
-                    value={draft.kind}
-                    aria-label="Type"
-                    onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Category['kind'] }))}
-                  >
-                    {CATEGORY_KINDS.map((k) => (
-                      <option key={k.value} value={k.value}>{k.label}</option>
-                    ))}
-                  </select>
-                )}
-                {!c.isSystem && draft.kind !== c.kind && (
-                  <p className="text-xs text-amber-600">
-                    Skifter du type, flytter kategoriens transaktioner mellem indkomst og udgift.
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <button type="button" className="btn-primary flex-1" onClick={() => void saveEdit(c)}>
-                    Gem
-                  </button>
-                  <button type="button" className="btn-ghost" onClick={() => setEditing(null)}>
-                    Fortryd
-                  </button>
-                </div>
-              </div>
-            )}
-            {/* Periodic bills are budgeted as a full period's cost and set
-                aside monthly, so the interval belongs with the category. */}
-            {!c.isSystem && c.kind === 'expense' && (
-              <label className="mt-2 flex items-center gap-2 text-xs text-ink-500">
-                Betales
-                <select
-                  className="rounded-lg border border-ink-200 bg-white px-2 py-1 text-xs dark:border-ink-700 dark:bg-ink-800"
-                  value={c.periodMonths ?? 1}
-                  onChange={async (e) => {
-                    const v = Number(e.target.value)
-                    await repo.updateCategory(c.id, { periodMonths: v === 1 ? null : v })
-                    await refresh()
-                  }}
-                >
-                  {PERIOD_OPTIONS.map((o) => (
-                    <option key={o.months} value={o.months}>
-                      {o.label}
-                    </option>
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={(e) => void handleDragEnd(e)}
+      >
+        {CATEGORY_GROUPS.map((group) => {
+          const rows = ordered.filter((c) => group.kinds.includes(c.kind))
+          if (rows.length === 0) return null
+          return (
+            <section key={group.key} className="mb-4">
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-400">
+                {group.label}
+              </h3>
+              <SortableContext items={rows.map((c) => c.id)} strategy={verticalListSortingStrategy}>
+                <ul className="space-y-1.5">
+                  {rows.map((c) => (
+                    <CategoryRow
+                      key={c.id}
+                      category={c}
+                      editing={editing === c.id}
+                      draft={draft}
+                      setDraft={setDraft}
+                      onToggle={() => (editing === c.id ? setEditing(null) : startEdit(c))}
+                      onSave={() => void saveEdit(c)}
+                      onCancel={() => setEditing(null)}
+                      onDelete={() => void remove(c)}
+                    />
                   ))}
-                </select>
-              </label>
-            )}
-          </li>
-        ))}
-      </ul>
+                </ul>
+              </SortableContext>
+            </section>
+          )
+        })}
+      </DndContext>
 
       <div className="card space-y-3">
         <h3 className="font-semibold">Ny kategori</h3>
@@ -375,6 +424,155 @@ function CategoriesPanel({ onClose }: { onClose: () => void }) {
         </button>
       </div>
     </Sheet>
+  )
+}
+
+function CategoryRow({
+  category: c,
+  editing,
+  draft,
+  setDraft,
+  onToggle,
+  onSave,
+  onCancel,
+  onDelete,
+}: {
+  category: Category
+  editing: boolean
+  draft: CategoryDraft
+  setDraft: React.Dispatch<React.SetStateAction<CategoryDraft>>
+  onToggle: () => void
+  onSave: () => void
+  onCancel: () => void
+  onDelete: () => void
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: c.id,
+    disabled: c.isSystem,
+  })
+  const badge = periodicBadge(c)
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`card py-2.5 ${isDragging ? 'relative z-10 opacity-80 shadow-lg' : ''}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        {!c.isSystem && (
+          <button
+            type="button"
+            // touch-none keeps the drag from fighting the sheet's scrolling.
+            className="shrink-0 cursor-grab touch-none px-1 text-ink-300"
+            aria-label={`Flyt ${c.name}`}
+            {...attributes}
+            {...listeners}
+          >
+            ⠿
+          </button>
+        )}
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          // Labelled with the name alone so the badges below stay out of the
+          // accessible name.
+          aria-label={c.name}
+          onClick={onToggle}
+        >
+          <span aria-hidden>{c.icon}</span>
+          <span className="truncate text-sm">{c.name}</span>
+          {c.isSystem && <span className="shrink-0 text-[10px] text-ink-400">SYSTEM</span>}
+          {badge && <span className="shrink-0 text-[10px] text-ink-400">{badge}</span>}
+        </button>
+        {!c.isSystem && (
+          <button type="button" className="shrink-0 text-xs text-red-600" onClick={onDelete}>
+            Slet
+          </button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-2 space-y-2">
+          <div className="flex gap-2">
+            <input
+              className="field w-16 text-center"
+              value={draft.icon}
+              aria-label="Ikon"
+              onChange={(e) => setDraft((d) => ({ ...d, icon: e.target.value.slice(0, 2) }))}
+            />
+            <input
+              autoFocus
+              className="field flex-1"
+              value={draft.name}
+              aria-label={`Navn på ${c.name}`}
+              onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') onSave()
+                if (e.key === 'Escape') onCancel()
+              }}
+            />
+          </div>
+          {!c.isSystem && (
+            <select
+              className="field"
+              value={draft.kind}
+              aria-label="Type"
+              onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Category['kind'] }))}
+            >
+              {CATEGORY_KINDS.map((k) => (
+                <option key={k.value} value={k.value}>{k.label}</option>
+              ))}
+            </select>
+          )}
+          {!c.isSystem && draft.kind !== c.kind && (
+            <p className="text-xs text-amber-600">
+              Skifter du type, flytter kategoriens transaktioner mellem indkomst og udgift.
+            </p>
+          )}
+
+          {/* Only an expense has a recurring bill to spread. Reading the staged
+              kind rather than the saved one means switching to Udgift reveals
+              this straight away, without a save-and-reopen. */}
+          {!c.isSystem && draft.kind === 'expense' && (
+            <>
+              <label className="flex items-center gap-2 text-xs text-ink-500">
+                Betales
+                <select
+                  className="rounded-lg border border-ink-200 bg-white px-2 py-1 text-xs dark:border-ink-700 dark:bg-ink-800"
+                  aria-label="Betales"
+                  value={draft.periodMonths ?? 1}
+                  onChange={(e) => {
+                    const v = Number(e.target.value)
+                    setDraft((d) => ({ ...d, periodMonths: v === 1 ? null : v }))
+                  }}
+                >
+                  {PERIOD_OPTIONS.map((o) => (
+                    <option key={o.months} value={o.months}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {draft.periodMonths !== null && draft.periodMonths > 1 && (
+                <p className="text-xs text-ink-500">
+                  Budgettet er hele regningen — der sættes 1/{draft.periodMonths} til side hver måned.
+                </p>
+              )}
+            </>
+          )}
+
+          <div className="flex gap-2">
+            <button type="button" className="btn-primary flex-1" onClick={onSave}>
+              Gem
+            </button>
+            <button type="button" className="btn-ghost" onClick={onCancel}>
+              Fortryd
+            </button>
+          </div>
+        </div>
+      )}
+    </li>
   )
 }
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { db } from '@/data/db'
@@ -7,8 +7,8 @@ import * as repo from '@/data/repo'
 import { AppDataProvider } from '@/app/useAppData'
 import { newId } from '@/lib/id'
 import { currentMonth } from '@/lib/dates'
-import type { Transaction } from '@/data/types'
-import { SettingsScreen } from './SettingsScreen'
+import type { Category, Transaction } from '@/data/types'
+import { SettingsScreen, reorderWithinGroup } from './SettingsScreen'
 
 /** Editing categories and rules, which previously could only be created or deleted. */
 
@@ -80,12 +80,12 @@ describe('editing a category', () => {
     renderScreen()
     await openPanel(/^Kategorier/)
 
-    await userEvent.click(await screen.findByRole('button', { name: /Dagligvarer/ }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Dagligvarer' }))
     const field = screen.getByLabelText(/Navn på Dagligvarer/)
     await userEvent.clear(field)
     await userEvent.type(field, 'Mad og drikke')
     await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
-    await screen.findByRole('button', { name: /Mad og drikke/ })
+    await screen.findByRole('button', { name: 'Mad og drikke' })
 
     const names = (await repo.listCategories()).map((c) => c.name)
     expect(names).toContain('Mad og drikke')
@@ -96,10 +96,15 @@ describe('editing a category', () => {
     renderScreen()
     await openPanel(/^Kategorier/)
 
-    await userEvent.click(await screen.findByRole('button', { name: /Dagligvarer/ }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Dagligvarer' }))
     await userEvent.selectOptions(screen.getByLabelText('Type'), 'income')
     await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
-    await screen.findByRole('button', { name: /Dagligvarer INDKOMST/ })
+
+    // It should move under the Indkomst heading, not merely change a field.
+    await waitFor(() => {
+      const section = screen.getByRole('heading', { name: 'Indkomst' }).closest('section') as HTMLElement
+      expect(within(section).getByRole('button', { name: 'Dagligvarer' })).toBeInTheDocument()
+    })
 
     const c = (await repo.listCategories()).find((x) => x.name === 'Dagligvarer')!
     expect(c.kind).toBe('income')
@@ -110,7 +115,7 @@ describe('editing a category', () => {
     await openPanel(/^Kategorier/)
 
     // Transfers are excluded from every total by kind, so it must stay fixed.
-    await userEvent.click(await screen.findByRole('button', { name: /Overførsel/ }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Overførsel' }))
     expect(screen.getByLabelText(/Navn på Overførsel/)).toBeInTheDocument()
     expect(screen.queryByLabelText('Type')).not.toBeInTheDocument()
   })
@@ -119,7 +124,7 @@ describe('editing a category', () => {
     renderScreen()
     await openPanel(/^Kategorier/)
 
-    await userEvent.click(await screen.findByRole('button', { name: /Dagligvarer/ }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Dagligvarer' }))
     const field = screen.getByLabelText(/Navn på Dagligvarer/)
     await userEvent.clear(field)
     await userEvent.type(field, 'Noget andet')
@@ -127,6 +132,154 @@ describe('editing a category', () => {
 
     const names = (await repo.listCategories()).map((c) => c.name)
     expect(names).toContain('Dagligvarer')
+  })
+})
+
+describe('the periodic interval', () => {
+  it('is saved from the editor and shown on the row', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    await userEvent.selectOptions(screen.getByLabelText('Betales'), '12')
+    await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
+
+    await waitFor(async () => {
+      const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+      expect(c.periodMonths).toBe(12)
+    })
+
+    // The badge is the only thing that distinguishes a yearly bill from a
+    // monthly one at a glance.
+    const row = (await screen.findByRole('button', { name: 'Forsikring' })).closest('li') as HTMLElement
+    expect(within(row).getByText('ÅRLIG')).toBeInTheDocument()
+  })
+
+  it('is discarded when the edit is cancelled', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    await userEvent.selectOptions(screen.getByLabelText('Betales'), '3')
+    await userEvent.click(screen.getByRole('button', { name: 'Fortryd' }))
+
+    const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+    expect(c.periodMonths).toBeNull()
+  })
+
+  it('is not offered for an income category', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    // Income has no recurring bill to spread over the year.
+    await userEvent.click(await screen.findByRole('button', { name: 'Løn' }))
+    expect(screen.queryByLabelText('Betales')).not.toBeInTheDocument()
+  })
+
+  it('appears as soon as the type is switched to expense', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Løn' }))
+    await userEvent.selectOptions(screen.getByLabelText('Type'), 'expense')
+
+    // Reading the staged kind, so no save-and-reopen round trip is needed.
+    expect(screen.getByLabelText('Betales')).toBeInTheDocument()
+  })
+
+  it('is cleared when a periodic category stops being an expense', async () => {
+    const insurance = (await repo.listCategories()).find((c) => c.name === 'Forsikring')!
+    await repo.updateCategory(insurance.id, { periodMonths: 12 })
+
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Forsikring' }))
+    await userEvent.selectOptions(screen.getByLabelText('Type'), 'income')
+    await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
+
+    // Left set, the interval would keep affecting nothing while still reading
+    // as configured.
+    await waitFor(async () => {
+      const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+      expect(c.periodMonths).toBeNull()
+    })
+  })
+})
+
+describe('ordering categories', () => {
+  it('groups them under Indkomst, Udgifter and Andre', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    const income = (await screen.findByRole('heading', { name: 'Indkomst' })).closest('section') as HTMLElement
+    const expense = screen.getByRole('heading', { name: 'Udgifter' }).closest('section') as HTMLElement
+
+    expect(within(income).getByRole('button', { name: 'Løn' })).toBeInTheDocument()
+    expect(within(income).queryByRole('button', { name: 'Dagligvarer' })).not.toBeInTheDocument()
+    expect(within(expense).getByRole('button', { name: 'Dagligvarer' })).toBeInTheDocument()
+  })
+
+  it('gives every ordinary category a drag handle', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await screen.findByRole('button', { name: 'Dagligvarer' })
+    expect(screen.getByRole('button', { name: 'Flyt Dagligvarer' })).toBeInTheDocument()
+  })
+
+  it('gives a system category no drag handle', async () => {
+    renderScreen()
+    await openPanel(/^Kategorier/)
+
+    await screen.findByRole('button', { name: 'Overførsel' })
+    expect(screen.queryByRole('button', { name: 'Flyt Overførsel' })).not.toBeInTheDocument()
+  })
+})
+
+/*
+ * The move itself is tested here rather than through the rendered list: both
+ * pointer and keyboard dragging need element rectangles to decide what was
+ * dropped where, and jsdom reports every element as zero-sized, so no drop
+ * target is ever found. This is the rule that drag ends up applying.
+ */
+describe('reorderWithinGroup', () => {
+  let cats: Category[]
+
+  beforeEach(async () => {
+    cats = await repo.listCategories()
+  })
+
+  const find = (name: string) => cats.find((c) => c.name === name)!
+
+  it('moves a category down within its group', () => {
+    const next = reorderWithinGroup(cats, find('Løn').id, find('Refusion').id)!
+    const ids = cats.map((c) => c.id)
+
+    expect(next).not.toBeNull()
+    expect(next.indexOf(find('Løn').id)).toBe(ids.indexOf(find('Refusion').id))
+    expect(next).toHaveLength(ids.length)
+    expect(new Set(next).size).toBe(ids.length)
+  })
+
+  it('moves a category up within its group', () => {
+    const next = reorderWithinGroup(cats, find('Gaver').id, find('Husleje').id)!
+    expect(next[cats.map((c) => c.id).indexOf(find('Husleje').id)]).toBe(find('Gaver').id)
+  })
+
+  it('refuses to move a category across the income/expense line', () => {
+    // Dropping under another heading would silently change the category's kind,
+    // and with it whether its transactions count as money in or money out.
+    expect(reorderWithinGroup(cats, find('Dagligvarer').id, find('Løn').id)).toBeNull()
+    expect(reorderWithinGroup(cats, find('Løn').id, find('Dagligvarer').id)).toBeNull()
+  })
+
+  it('refuses to move a system category, or to displace one', () => {
+    expect(reorderWithinGroup(cats, find('Overførsel').id, find('Opsparing').id)).toBeNull()
+  })
+
+  it('is a no-op when dropped on itself', () => {
+    expect(reorderWithinGroup(cats, find('Løn').id, find('Løn').id)).toBeNull()
   })
 })
 

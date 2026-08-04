@@ -138,6 +138,11 @@ export async function createCategory(data: {
   periodMonths?: number | null
 }): Promise<Category> {
   const categories = await listCategories()
+  // Appended to its own kind, not to the very end. The system categories sort
+  // at 900+, so a global "last + 10" put every new category — income included —
+  // below the whole expense list.
+  const sameKind = categories.filter((c) => c.kind === data.kind)
+  const after = sameKind.at(-1) ?? categories.at(-1)
   const category = create({
     name: data.name,
     kind: data.kind,
@@ -147,10 +152,32 @@ export async function createCategory(data: {
     isSystem: false,
     archived: false,
     periodMonths: data.periodMonths ?? null,
-    sortOrder: (categories.at(-1)?.sortOrder ?? 0) + 10,
+    sortOrder: (after?.sortOrder ?? 0) + 10,
   }) as Category
   await db.categories.put(category)
   return category
+}
+
+/**
+ * Rewrites the display order of every category in one pass.
+ *
+ * Takes the full list rather than a moved pair: renumbering everything from
+ * scratch keeps the order total and gap-free, so no sequence of moves can work
+ * its way into ties or exhaust the space between two neighbours.
+ */
+export async function reorderCategories(orderedIds: string[]): Promise<void> {
+  const ts = now()
+  await db.transaction('rw', db.categories, async () => {
+    const rows = await db.categories.bulkGet(orderedIds)
+    const next: Category[] = []
+    rows.forEach((c, i) => {
+      if (!c) return
+      const sortOrder = (i + 1) * 10
+      if (c.sortOrder === sortOrder) return
+      next.push({ ...c, sortOrder, updatedAt: ts })
+    })
+    if (next.length > 0) await db.categories.bulkPut(next)
+  })
 }
 
 export async function updateCategory(id: string, patch: Partial<Category>): Promise<void> {
