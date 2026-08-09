@@ -4,6 +4,7 @@ import type { Category, ResolvedBudget, Transaction } from '@/data/types'
 import { isTransfer } from '@/features/import/transfers'
 import { monthlyTotals } from '@/features/budget/suggest'
 import type { PotState } from '@/features/budget/pot'
+import { paceAt, spendCurves, type PaceCurve, type PaceState } from './pace'
 
 /**
  * Where the current month will land, per category and overall.
@@ -36,6 +37,12 @@ export interface CategoryProjection {
    * budget, less what has been spent — rather than budget-minus-spend.
    */
   pot: PotState | null
+  /**
+   * Where this month stands against the category's usual rhythm. Null for a
+   * fixed bill, which has no pace to be ahead of, and for a category whose
+   * history is too thin to claim a shape.
+   */
+  pace: PaceState | null
   /** Plain-language line shown in the alerts list. */
   message: string | null
 }
@@ -140,6 +147,11 @@ export function projectMonth(params: {
   // if it has not been paid yet this month.
   const history = monthlyTotals(transactions, historyMonths)
 
+  // When within a month each category usually spends. Judging against this
+  // instead of a daily average is what stops one early shop reading as a
+  // disaster and a weekly shopper reading as safe the day before a shop.
+  const curves = spendCurves(transactions, historyMonths)
+
   const projections: CategoryProjection[] = []
 
   const relevantIds = new Set<string>([...actualByCategory.keys(), ...budgets.keys()])
@@ -191,6 +203,7 @@ export function projectMonth(params: {
         recurringSettled: false,
         isRecurring: recurring.has(categoryId),
         pot,
+        pace: null,
         message,
       })
       continue
@@ -201,11 +214,12 @@ export function projectMonth(params: {
 
     const historicalMedian = medianOf(history.get(categoryId), historyMonths)
 
-    const projectedMinor = projectCategory({
+    const { projectedMinor, pace } = projectCategory({
       actualMinor,
       isRecurring,
       historicalMedian,
       budgetMinor,
+      curve: curves.get(categoryId),
       daysElapsed,
       daysTotal,
       shouldProject,
@@ -226,7 +240,8 @@ export function projectMonth(params: {
       recurringSettled: isRecurring && actualMinor > 0,
       isRecurring,
       pot: null,
-      message: messageFor(category.name, actualMinor, projectedMinor, budgetMinor, status),
+      pace,
+      message: messageFor(category.name, actualMinor, projectedMinor, budgetMinor, status, pace),
     })
   }
 
@@ -275,32 +290,50 @@ function projectCategory(p: {
   isRecurring: boolean
   historicalMedian: number
   budgetMinor: number | null
+  curve: PaceCurve | undefined
   daysElapsed: number
   daysTotal: number
   shouldProject: boolean
-}): number {
+}): { projectedMinor: number; pace: PaceState | null } {
   // A finished — or not-yet-started — month is not a projection.
-  if (!p.shouldProject) return p.actualMinor
+  if (!p.shouldProject) return { projectedMinor: p.actualMinor, pace: null }
 
   if (p.isRecurring) {
-    // The bill has landed — nothing more is expected this month.
-    if (p.actualMinor > 0) return p.actualMinor
-    // Not yet paid. Expect the usual amount, or the budget if there's no history.
-    return p.historicalMedian || p.budgetMinor || 0
+    // A fixed bill has no pace to be ahead of: it has either landed or it has
+    // not, and pro-rating it was never the question.
+    const projectedMinor =
+      p.actualMinor > 0
+        ? p.actualMinor // The bill has landed — nothing more is expected.
+        : p.historicalMedian || p.budgetMinor || 0
+    return { projectedMinor, pace: null }
   }
 
-  // Variable: extrapolate the daily rate over the rest of the month.
-  const projected = scaleToMonth(p.actualMinor, p.daysElapsed, p.daysTotal)
-
-  // Very early in the month a couple of purchases extrapolate absurdly
-  // (one 800 kr shop on the 2nd → 12.000 kr). Blend toward the historical
-  // median until enough of the month has passed for the rate to mean something.
-  if (p.daysElapsed < 10 && p.historicalMedian > 0) {
-    const weight = p.daysElapsed / 10
-    return Math.round(projected * weight + p.historicalMedian * (1 - weight))
+  // Variable: judge against how this category usually spends across a month.
+  if (p.curve && p.budgetMinor !== null && p.budgetMinor > 0) {
+    const pace = paceAt({
+      curve: p.curve,
+      budgetMinor: p.budgetMinor,
+      actualMinor: p.actualMinor,
+      day: p.daysElapsed,
+      historicalMedianMinor: p.historicalMedian,
+    })
+    if (pace.reliable) return { projectedMinor: pace.projectedMinor, pace }
   }
 
-  return projected
+  /*
+   * Too little history to know the shape. Rather than assert a straight line —
+   * the assumption this whole module exists to remove — lean on what a normal
+   * month costs, and only fall back to extrapolation when there is no history
+   * at all to lean on.
+   */
+  if (p.historicalMedian > 0) {
+    return { projectedMinor: Math.max(p.historicalMedian, p.actualMinor), pace: null }
+  }
+
+  return {
+    projectedMinor: scaleToMonth(p.actualMinor, p.daysElapsed, p.daysTotal),
+    pace: null,
+  }
 }
 
 function scaleToMonth(amount: number, daysElapsed: number, daysTotal: number): number {
@@ -333,21 +366,36 @@ function krLabel(minor: number): string {
   return `${Math.round(minor / 100).toLocaleString('da-DK')} kr`
 }
 
+/**
+ * The warning line in the alerts list.
+ *
+ * It used to say "lander omkring 5.600 kr" from a straight-line extrapolation
+ * — a number derived from an assumption the user does not spend by. Where the
+ * category's rhythm is known the comparison is against that rhythm, and the
+ * figure quoted is something that actually happened in past months. Where it is
+ * not known, the line states facts and forecasts nothing.
+ */
 function messageFor(
   name: string,
   actualMinor: number,
   projectedMinor: number,
   budgetMinor: number | null,
   status: ProjectionStatus,
+  pace: PaceState | null,
 ): string | null {
   if (budgetMinor === null || status === 'no-budget' || status === 'on-track') return null
 
-  const kr = (minor: number) => `${Math.round(minor / 100).toLocaleString('da-DK')} kr`
+  const kr = krLabel
 
   if (actualMinor > budgetMinor) {
     return `${name}: ${kr(actualMinor)} brugt af ${kr(budgetMinor)} — allerede ${kr(actualMinor - budgetMinor)} over.`
   }
-  return `${name}: ${kr(actualMinor)} af ${kr(budgetMinor)} — lander omkring ${kr(projectedMinor)}, ca. ${kr(projectedMinor - budgetMinor)} over.`
+
+  if (pace?.reliable) {
+    return `${name}: ${kr(actualMinor)} brugt — du plejer at være på ${kr(pace.expectedByNowMinor)} den ${pace.day}. Lander omkring ${kr(projectedMinor)}.`
+  }
+
+  return `${name}: ${kr(actualMinor)} af ${kr(budgetMinor)} brugt.`
 }
 
 function medianOf(perMonth: Map<IsoMonth, number> | undefined, months: IsoMonth[]): number {

@@ -155,15 +155,17 @@ describe('saving up in a category', () => {
     await userEvent.click(screen.getByRole('checkbox', { name: /Gem det ubrugte/ }))
     await userEvent.click(screen.getByRole('button', { name: 'Gem' }))
 
-    await waitFor(async () => {
-      const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
-      expect(c.rollover).toBe(true)
-      // Accrual has to start somewhere, or the pot cannot be computed at all.
-      expect(c.rolloverSince).toMatch(/^\d{4}-\d{2}$/)
+    // Waiting on the badge rather than on the database: the write lands before
+    // the provider has reloaded, so a synchronous DOM check here raced it.
+    await waitFor(() => {
+      const row = screen.getByRole('button', { name: 'Forsikring' }).closest('li') as HTMLElement
+      expect(within(row).getByText(/OPSPARING/)).toBeInTheDocument()
     })
 
-    const row = (await screen.findByRole('button', { name: 'Forsikring' })).closest('li') as HTMLElement
-    expect(within(row).getByText(/OPSPARING/)).toBeInTheDocument()
+    const c = (await repo.listCategories()).find((x) => x.name === 'Forsikring')!
+    expect(c.rollover).toBe(true)
+    // Accrual has to start somewhere, or the pot cannot be computed at all.
+    expect(c.rolloverSince).toMatch(/^\d{4}-\d{2}$/)
   })
 
   it('is discarded when the edit is cancelled', async () => {

@@ -295,6 +295,7 @@ export function BudgetScreen() {
                           </span>
                         )}
                       </div>
+                      <PaceLine projection={c} />
                     </>
                   )}
 
@@ -340,6 +341,30 @@ export function BudgetScreen() {
         />
       )}
     </Screen>
+  )
+}
+
+/**
+ * Where the month stands against how this category usually spends.
+ *
+ * Shown whether or not anything is wrong — "am I ahead or behind" is a question
+ * asked in a good month too — and shown only when the category's rhythm is
+ * actually known, since the alternative is the straight-line guess this
+ * replaced. A tolerance keeps the line quiet about rounding-sized differences.
+ */
+function PaceLine({ projection }: { projection: CategoryProjection }) {
+  const pace = projection.pace
+  if (!pace?.reliable) return null
+
+  const ahead = pace.aheadMinor
+  if (Math.abs(ahead) < 5000) {
+    return <p className="mt-1 text-xs text-ink-400">Følger dit normale forbrug for den {pace.day}.</p>
+  }
+
+  return (
+    <p className="mt-1 text-xs text-ink-400">
+      {formatMoneyRounded(Math.abs(ahead))} {ahead > 0 ? 'foran' : 'under'} dit normale forbrug den {pace.day}.
+    </p>
   )
 }
 

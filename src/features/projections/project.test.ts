@@ -90,29 +90,48 @@ describe('projectMonth — recurring categories', () => {
 })
 
 describe('projectMonth — variable categories', () => {
-  const history = monthlySeries('groceries', [
-    ['2025-10', 200000], ['2025-11', 420000], ['2025-12', 260000],
-    ['2026-01', 195000], ['2026-02', 380000],
-  ])
+  /**
+   * Weekly shops, which is what makes the difference from a daily average
+   * visible. Monthly totals vary so the category is not mistaken for a fixed
+   * bill, and each month normalises to its own total, so the shape is a clean
+   * quarter per shop.
+   */
+  const history = [200000, 420000, 260000, 195000, 380000].flatMap((total, i) =>
+    [3, 10, 17, 24].map((day) =>
+      tx({
+        date: `${HISTORY[i]}-${String(day).padStart(2, '0')}`,
+        amountMinor: -Math.round(total / 4),
+        categoryId: 'groceries',
+        categorySource: 'manual',
+      }),
+    ),
+  )
+  // Median of the monthly totals above.
+  const HISTORICAL_MEDIAN = 260000
 
-  it('extrapolates the daily rate over the remaining days', () => {
-    // 1.500 kr over 15 of 31 days projects to roughly 3.100 kr.
-    const txs = [...history, tx({ date: '2026-03-10', amountMinor: -150000, categoryId: 'groceries', categorySource: 'manual' })]
+  it('counts the shopping still to come rather than averaging by day', () => {
+    // Three of four weekly shops done by the 17th, 3.000 kr against a 4.000 kr
+    // budget. A daily average would call this 5.470 kr and flag it; the shape
+    // knows one shop is left and lands it inside the budget.
+    const txs = [
+      ...history,
+      tx({ date: '2026-03-17', amountMinor: -300000, categoryId: 'groceries', categorySource: 'manual' }),
+    ]
 
     const result = projectMonth({
       month: MONTH,
       transactions: txs,
       categories: [groceries],
-      budgets: new Map([['groceries', budget('groceries', 220000)]]),
+      budgets: new Map([['groceries', budget('groceries', 400000)]]),
       historyMonths: HISTORY,
-      now: MID_MONTH,
+      now: new Date(2026, 2, 17),
     })
 
     const p = result.categories.find((c) => c.categoryId === 'groceries')!
-    expect(p.actualMinor).toBe(150000)
-    expect(p.projectedMinor).toBeGreaterThan(290000)
-    expect(p.projectedMinor).toBeLessThan(320000)
-    expect(p.status).toBe('over')
+    expect(p.actualMinor).toBe(300000)
+    // 400.000 × 0.75 + 260.000 × 0.25
+    expect(p.projectedMinor).toBe(365000)
+    expect(p.status).toBe('on-track')
   })
 
   it('does not extrapolate wildly from the first days of the month', () => {
@@ -129,7 +148,36 @@ describe('projectMonth — variable categories', () => {
     })
 
     const p = result.categories.find((c) => c.categoryId === 'groceries')!
-    expect(p.projectedMinor).toBeLessThan(600000)
+    // Nothing has usually been spent by the 2nd, so this leans on history.
+    expect(p.projectedMinor).toBeLessThan(400000)
+    expect(p.projectedMinor).toBeGreaterThanOrEqual(HISTORICAL_MEDIAN)
+  })
+
+  it('warns before the budget is reached when the pace says it will be', () => {
+    // 3.000 kr by the 10th against a 4.000 kr budget: still inside it, but half
+    // a month's shopping is usually done by now, so this lands over.
+    const txs = [
+      ...history,
+      tx({ date: '2026-03-10', amountMinor: -300000, categoryId: 'groceries', categorySource: 'manual' }),
+    ]
+
+    const result = projectMonth({
+      month: MONTH,
+      transactions: txs,
+      categories: [groceries],
+      budgets: new Map([['groceries', budget('groceries', 400000)]]),
+      historyMonths: HISTORY,
+      now: new Date(2026, 2, 10),
+    })
+
+    const p = result.categories.find((c) => c.categoryId === 'groceries')!
+    expect(p.actualMinor).toBeLessThan(400000)
+    expect(p.status).toBe('at-risk')
+    // 400.000 × 0.5 — half a normal month's shopping.
+    expect(p.pace!.expectedByNowMinor).toBe(200000)
+    expect(p.pace!.aheadMinor).toBe(100000)
+    // The warning quotes that pace, not a straight-line landing figure.
+    expect(p.message).toContain('du plejer at være på 2.000 kr den 10')
   })
 
   it('reports a finished month as actuals, not a projection', () => {
